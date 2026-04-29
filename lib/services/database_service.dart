@@ -1,0 +1,1663 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class DatabaseService {
+  static final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  // Collection references
+  static const String usersCollection = 'users';
+  static const String clientsCollection = 'clients';
+  static const String providersCollection = 'providers';
+  static const String requestsCollection = 'service_requests';
+  static const String bookingsCollection = 'bookings';
+  static const String conversationsCollection = 'conversations';
+  static const String messagesCollection = 'messages';
+  static const String reviewsCollection = 'reviews';
+  static const String notificationsCollection = 'notifications';
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // USER OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /// Save user basic information
+  static Future<void> saveUserData({
+    required String userId,
+    required String phoneNumber,
+    required String displayName,
+    required String email,
+    required bool isClient,
+    required String nidNumber,
+    required String dateOfBirth,
+    required String fatherName,
+    required String motherName,
+    required String address,
+    String password = '',
+  }) async {
+    try {
+      final userData = {
+        'userId': userId,
+        'phoneNumber': phoneNumber,
+        'displayName': displayName,
+        'email': email,
+        'isClient': isClient,
+        'userType': isClient ? 'client' : 'provider',
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+        'isActive': true,
+      };
+
+      // Save to users collection (merge so we never wipe existing profile fields)
+      await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .set(userData, SetOptions(merge: true));
+
+      // Save to specific role collection
+      final roleCollection = isClient ? clientsCollection : providersCollection;
+      final roleData = {
+        ...userData,
+        'nidNumber': nidNumber,
+        'dateOfBirth': dateOfBirth,
+        'fatherName': fatherName,
+        'motherName': motherName,
+        'address': address,
+        'password': password,
+        'profileComplete': true,
+      };
+
+      await _firestore
+          .collection(roleCollection)
+          .doc(userId)
+          .set(roleData, SetOptions(merge: true));
+    } catch (e) {
+      throw Exception('Failed to save user data: $e');
+    }
+  }
+
+  /// Update user profile
+  static Future<void> updateUserProfile({
+    required String userId,
+    required Map<String, dynamic> updates,
+  }) async {
+    try {
+      updates['updatedAt'] = FieldValue.serverTimestamp();
+
+      await _firestore.collection(usersCollection).doc(userId).update(updates);
+
+      // Also update the role-specific collection
+      // This will be determined by querying the user first
+      final userDoc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      if (userDoc.exists) {
+        final userType = userDoc['userType'] as String;
+        final roleCollection = userType == 'client'
+            ? clientsCollection
+            : providersCollection;
+        await _firestore.collection(roleCollection).doc(userId).update(updates);
+      }
+    } catch (e) {
+      throw Exception('Failed to update user profile: $e');
+    }
+  }
+
+  /// Get user data
+  static Future<Map<String, dynamic>?> getUserData(String userId) async {
+    try {
+      final doc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      return doc.data();
+    } catch (e) {
+      throw Exception('Failed to fetch user data: $e');
+    }
+  }
+
+  /// Get full user details including NID info and password from role collection
+  static Future<Map<String, dynamic>?> getUserFullDetails(
+    String userId,
+    String userType,
+  ) async {
+    try {
+      final roleCollection = userType == 'client'
+          ? clientsCollection
+          : providersCollection;
+      final doc = await _firestore.collection(roleCollection).doc(userId).get();
+      if (doc.exists) return {'id': doc.id, ...doc.data()!};
+      return await getUserData(userId);
+    } catch (e) {
+      throw Exception('Failed to fetch user details: $e');
+    }
+  }
+
+  /// Get user by phone number
+  static Future<Map<String, dynamic>?> getUserByPhoneNumber(
+    String phoneNumber,
+  ) async {
+    try {
+      final snapshot = await _firestore
+          .collection(usersCollection)
+          .where('phoneNumber', isEqualTo: phoneNumber)
+          .limit(1)
+          .get();
+
+      if (snapshot.docs.isNotEmpty) {
+        return snapshot.docs.first.data();
+      }
+      return null;
+    } catch (e) {
+      throw Exception('Failed to fetch user by phone: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // CLIENT-SPECIFIC OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /// Get client profile
+  static Future<Map<String, dynamic>?> getClientProfile(String userId) async {
+    try {
+      final doc = await _firestore
+          .collection(clientsCollection)
+          .doc(userId)
+          .get();
+      return doc.data();
+    } catch (e) {
+      throw Exception('Failed to fetch client profile: $e');
+    }
+  }
+
+  /// Update client profile
+  static Future<void> updateClientProfile({
+    required String userId,
+    required Map<String, dynamic> updates,
+  }) async {
+    try {
+      updates['updatedAt'] = FieldValue.serverTimestamp();
+      await _firestore
+          .collection(clientsCollection)
+          .doc(userId)
+          .update(updates);
+      await _firestore.collection(usersCollection).doc(userId).update(updates);
+    } catch (e) {
+      throw Exception('Failed to update client profile: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // PROVIDER-SPECIFIC OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /// Get provider profile
+  static Future<Map<String, dynamic>?> getProviderProfile(String userId) async {
+    try {
+      final userDoc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      final providerDoc = await _firestore
+          .collection(providersCollection)
+          .doc(userId)
+          .get();
+
+      final userData = userDoc.data();
+      final providerData = providerDoc.data();
+
+      if (userData == null && providerData == null) {
+        return null;
+      }
+
+      // providers/{uid} is the canonical source for profile-specific fields
+      // (about, services, hourlyRate, availability). Spread it last so its
+      // values win over any stale or basic-only entries in users/{uid}.
+      return {...?userData, ...?providerData};
+    } catch (e) {
+      throw Exception('Failed to fetch provider profile: $e');
+    }
+  }
+
+  /// Update provider profile
+  static Future<void> updateProviderProfile({
+    required String userId,
+    required Map<String, dynamic> updates,
+  }) async {
+    try {
+      final normalizedUpdates = Map<String, dynamic>.from(updates);
+      final aboutValue =
+          (normalizedUpdates['aboutText'] ?? normalizedUpdates['about'] ?? '')
+              .toString();
+      final servicesValue =
+          normalizedUpdates['services'] ??
+          normalizedUpdates['servicesOffered'] ??
+          const <String>[];
+      final hourlyRateValue =
+          normalizedUpdates['hourlyRate'] ?? normalizedUpdates['price'];
+      final availabilityValue =
+          normalizedUpdates['availabilityText'] ??
+          normalizedUpdates['availableText'];
+      final jobsValue =
+          normalizedUpdates['jobsCompleted'] ?? normalizedUpdates['jobs'];
+      final expValue =
+          normalizedUpdates['experience'] ?? normalizedUpdates['exp'];
+
+      normalizedUpdates['about'] = aboutValue;
+      normalizedUpdates['aboutText'] = aboutValue;
+      normalizedUpdates['services'] = servicesValue;
+      normalizedUpdates['servicesOffered'] = servicesValue;
+      if (hourlyRateValue != null) {
+        normalizedUpdates['hourlyRate'] = hourlyRateValue;
+        normalizedUpdates['price'] = hourlyRateValue;
+      }
+      if (availabilityValue != null) {
+        normalizedUpdates['availabilityText'] = availabilityValue;
+      }
+      if (jobsValue != null) {
+        normalizedUpdates['jobs'] = jobsValue;
+        normalizedUpdates['jobsCompleted'] = jobsValue;
+        normalizedUpdates['totalJobs'] = jobsValue;
+      }
+      if (expValue != null) {
+        normalizedUpdates['experience'] = expValue;
+        normalizedUpdates['exp'] = expValue;
+      }
+      normalizedUpdates['updatedAt'] = FieldValue.serverTimestamp();
+
+      await _firestore
+          .collection(providersCollection)
+          .doc(userId)
+          .set(normalizedUpdates, SetOptions(merge: true));
+      await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .set(normalizedUpdates, SetOptions(merge: true));
+    } catch (e) {
+      throw Exception('Failed to update provider profile: $e');
+    }
+  }
+
+  /// Get all providers by service type
+  static Future<List<Map<String, dynamic>>> getProvidersByServiceType(
+    String serviceType,
+  ) async {
+    try {
+      final snapshot = await _firestore
+          .collection(providersCollection)
+          .where('isActive', isEqualTo: true)
+          .get();
+
+      final requestedCategory = _canonicalCategory(serviceType);
+      final providers = <Map<String, dynamic>>[];
+
+      for (var doc in snapshot.docs) {
+        final providerId = doc.id;
+        final providerData = doc.data();
+
+        // Also fetch from users collection to get latest updates
+        final userDoc = await _firestore
+            .collection(usersCollection)
+            .doc(providerId)
+            .get();
+        final userData = userDoc.data();
+
+        // Merge with users data taking priority
+        final merged = {...providerData, ...?userData};
+
+        final displayName =
+            (merged['displayName'] ?? merged['name'] ?? 'Provider').toString();
+        final specialty = (merged['serviceType'] ?? merged['specialty'] ?? '')
+            .toString();
+        final hourlyRate = merged['hourlyRate'] ?? merged['price'] ?? '0';
+        final services =
+            merged['services'] ?? merged['servicesOffered'] ?? const [];
+
+        final provider = {
+          'id': providerId,
+          ...merged,
+          'name': displayName,
+          'specialty': specialty.isNotEmpty ? specialty : serviceType,
+          'available': merged['isAvailable'] ?? merged['available'] ?? true,
+          'price': hourlyRate,
+          'rating': _toDouble(merged['ratingAvg'] ?? merged['rating']),
+          'reviews': _toInt(merged['totalReviews'] ?? merged['reviews']),
+          'jobs': _toInt(merged['jobsCompleted'] ?? merged['jobs']),
+          'exp': merged['experience'] ?? merged['exp'] ?? '',
+          'initials': merged['initials'] ?? _initialsFromName(displayName),
+          'services': services,
+          'about': merged['about'] ?? merged['aboutText'] ?? '',
+          'aboutText': merged['aboutText'] ?? merged['about'] ?? '',
+          'availabilityText':
+              merged['availabilityText'] ?? merged['availableText'] ?? '',
+        };
+
+        // Filter by requested category
+        if (requestedCategory.isNotEmpty) {
+          final specialtyCanonical = _canonicalCategory(
+            provider['specialty'].toString(),
+          );
+          final serviceTypeValue = _canonicalCategory(
+            (provider['serviceType'] ?? '').toString(),
+          );
+          if (specialtyCanonical == requestedCategory ||
+              serviceTypeValue == requestedCategory ||
+              specialtyCanonical.contains(requestedCategory) ||
+              requestedCategory.contains(specialtyCanonical)) {
+            providers.add(provider);
+          }
+        } else {
+          providers.add(provider);
+        }
+      }
+
+      providers.sort(
+        (a, b) => _toDouble(b['rating']).compareTo(_toDouble(a['rating'])),
+      );
+      return providers;
+    } catch (e) {
+      throw Exception('Failed to fetch providers: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // USER ACTIVITY/STATUS OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /// Set user online/offline status
+  static Future<void> setUserStatus({
+    required String userId,
+    required bool isOnline,
+  }) async {
+    try {
+      await _firestore.collection(usersCollection).doc(userId).update({
+        'isOnline': isOnline,
+        'lastActive': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception('Failed to update user status: $e');
+    }
+  }
+
+  /// Deactivate user account
+  static Future<void> deactivateUserAccount(String userId) async {
+    try {
+      await _firestore.collection(usersCollection).doc(userId).update({
+        'isActive': false,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      // Also deactivate in role-specific collection
+      final userDoc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      if (userDoc.exists) {
+        final userType = userDoc['userType'] as String;
+        final roleCollection = userType == 'client'
+            ? clientsCollection
+            : providersCollection;
+        await _firestore.collection(roleCollection).doc(userId).update({
+          'isActive': false,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (e) {
+      throw Exception('Failed to deactivate account: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // BATCH OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /// Delete user data (should be called when user account is deleted)
+  static Future<void> deleteUserData(String userId) async {
+    try {
+      WriteBatch batch = _firestore.batch();
+
+      // Delete from users collection
+      batch.delete(_firestore.collection(usersCollection).doc(userId));
+
+      // Determine user type and delete from role collection
+      final userDoc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      if (userDoc.exists) {
+        final userType = userDoc['userType'] as String;
+        final roleCollection = userType == 'client'
+            ? clientsCollection
+            : providersCollection;
+        batch.delete(_firestore.collection(roleCollection).doc(userId));
+      }
+
+      await batch.commit();
+    } catch (e) {
+      throw Exception('Failed to delete user data: $e');
+    }
+  }
+
+  /// Check if user exists
+  static Future<bool> userExists(String userId) async {
+    try {
+      final doc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      return doc.exists;
+    } catch (e) {
+      throw Exception('Failed to check user existence: $e');
+    }
+  }
+
+  /// Get user count by type
+  static Future<int> getUserCountByType(String userType) async {
+    try {
+      final snapshot = await _firestore
+          .collection(usersCollection)
+          .where('userType', isEqualTo: userType)
+          .count()
+          .get();
+      return snapshot.count ?? 0;
+    } catch (e) {
+      throw Exception('Failed to get user count: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // SERVICE REQUEST OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<void> createServiceRequest({
+    required String clientId,
+    required String category,
+    required String description,
+    required String location,
+    required String budget,
+    required bool isUrgent,
+  }) async {
+    try {
+      await _firestore.collection(requestsCollection).add({
+        'clientId': clientId,
+        'category': category,
+        'categoryKey': _canonicalCategory(category),
+        'description': description,
+        'location': location,
+        'budget': budget,
+        'isUrgent': isUrgent,
+        'status': 'open',
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception('Failed to create service request: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getClientRequests(
+    String clientId,
+  ) async {
+    try {
+      final snapshot = await _firestore
+          .collection(requestsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .get();
+
+      final requests = snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      _sortByCreatedAtDesc(requests);
+      return requests;
+    } catch (e) {
+      throw Exception('Failed to fetch client requests: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getOpenRequests({
+    String? category,
+  }) async {
+    try {
+      final snapshot = await _firestore
+          .collection(requestsCollection)
+          .where('status', isEqualTo: 'open')
+          .get();
+
+      final requests = snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+
+      final normalizedCategory = _canonicalCategory(category ?? '');
+      if (normalizedCategory.isNotEmpty) {
+        final filtered = requests.where((r) {
+          final raw = (r['category'] ?? '').toString();
+          final key = (r['categoryKey'] ?? '').toString();
+          final normalizedRaw = _canonicalCategory(raw);
+          return key == normalizedCategory ||
+              normalizedRaw == normalizedCategory ||
+              raw.toLowerCase().contains(normalizedCategory) ||
+              normalizedCategory.contains(raw.toLowerCase());
+        }).toList();
+
+        _sortByCreatedAtDesc(filtered);
+        return filtered;
+      }
+
+      _sortByCreatedAtDesc(requests);
+      return requests;
+    } catch (e) {
+      throw Exception('Failed to fetch open requests: $e');
+    }
+  }
+
+  static Future<Map<String, dynamic>> getClientStats(String clientId) async {
+    try {
+      final activeSnapshot = await _firestore
+          .collection(requestsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .where('status', whereIn: ['open', 'accepted', 'in_progress'])
+          .get();
+
+      final completedSnapshot = await _firestore
+          .collection(requestsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .where('status', isEqualTo: 'completed')
+          .get();
+
+      return {
+        'active': activeSnapshot.docs.length,
+        'completed': completedSnapshot.docs.length,
+      };
+    } catch (e) {
+      throw Exception('Failed to fetch client stats: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // BOOKING OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<String> createBooking({
+    required String requestId,
+    required String clientId,
+    required String providerId,
+    required String agreedPrice,
+    String description = '',
+    String status = 'pending',
+  }) async {
+    try {
+      final bookingRef = _firestore.collection(bookingsCollection).doc();
+
+      await bookingRef.set({
+        'requestId': requestId,
+        'clientId': clientId,
+        'providerId': providerId,
+        'agreedPrice': agreedPrice,
+        'description': description,
+        'status': status,
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      if (requestId.isNotEmpty) {
+        await _firestore.collection(requestsCollection).doc(requestId).update({
+          'status': status,
+          'providerId': providerId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      // Ensure a conversation exists so either party can chat before acceptance.
+      try {
+        await getOrCreateConversation(
+          clientId: clientId,
+          providerId: providerId,
+        );
+      } catch (_) {}
+
+      return bookingRef.id;
+    } catch (e) {
+      throw Exception('Failed to create booking: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getProviderBookings(
+    String providerId,
+  ) async {
+    try {
+      final snapshot = await _firestore
+          .collection(bookingsCollection)
+          .where('providerId', isEqualTo: providerId)
+          .get();
+
+      final bookings = snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      _sortByCreatedAtDesc(bookings);
+      return bookings;
+    } catch (e) {
+      throw Exception('Failed to fetch provider bookings: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getClientBookings(
+    String clientId,
+  ) async {
+    try {
+      final snapshot = await _firestore
+          .collection(bookingsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .get();
+
+      final bookings = snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      _sortByCreatedAtDesc(bookings);
+      return bookings;
+    } catch (e) {
+      throw Exception('Failed to fetch client bookings: $e');
+    }
+  }
+
+  /// Fetch a service request by its document id.
+  static Future<Map<String, dynamic>?> getServiceRequest(
+    String requestId,
+  ) async {
+    if (requestId.isEmpty) return null;
+    try {
+      final doc = await _firestore
+          .collection(requestsCollection)
+          .doc(requestId)
+          .get();
+      if (!doc.exists) return null;
+      return {'id': doc.id, ...?doc.data()};
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> updateBookingStatus({
+    required String bookingId,
+    required String status,
+  }) async {
+    try {
+      await _firestore.collection(bookingsCollection).doc(bookingId).update({
+        'status': status,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      final bookingDoc = await _firestore
+          .collection(bookingsCollection)
+          .doc(bookingId)
+          .get();
+      final requestId = bookingDoc.data()?['requestId'] as String?;
+      if (requestId != null && requestId.isNotEmpty) {
+        await _firestore.collection(requestsCollection).doc(requestId).update({
+          'status': status,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (e) {
+      throw Exception('Failed to update booking status: $e');
+    }
+  }
+
+  static Future<Map<String, dynamic>> getProviderStats(
+    String providerId,
+  ) async {
+    try {
+      final activeSnapshot = await _firestore
+          .collection(bookingsCollection)
+          .where('providerId', isEqualTo: providerId)
+          .where('status', whereIn: ['confirmed', 'in_progress'])
+          .get();
+
+      final allSnapshot = await _firestore
+          .collection(bookingsCollection)
+          .where('providerId', isEqualTo: providerId)
+          .get();
+
+      double totalEarnings = 0;
+      int completedJobs = 0;
+      for (final doc in allSnapshot.docs) {
+        final data = doc.data();
+        if ((data['status'] ?? '') == 'completed') {
+          completedJobs += 1;
+          final total = _toDouble(data['totalAmount']);
+          totalEarnings += total > 0 ? total : _toDouble(data['agreedPrice']);
+        }
+      }
+
+      return {
+        'activeJobs': activeSnapshot.docs.length,
+        'totalJobs': completedJobs,
+        'totalEarnings': totalEarnings,
+      };
+    } catch (e) {
+      throw Exception('Failed to fetch provider stats: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // CONVERSATION + MESSAGE OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<String> getOrCreateConversation({
+    required String clientId,
+    required String providerId,
+  }) async {
+    try {
+      final existing = await _firestore
+          .collection(conversationsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .where('providerId', isEqualTo: providerId)
+          .limit(1)
+          .get();
+
+      if (existing.docs.isNotEmpty) {
+        return existing.docs.first.id;
+      }
+
+      final docRef = _firestore.collection(conversationsCollection).doc();
+      await docRef.set({
+        'clientId': clientId,
+        'providerId': providerId,
+        'lastMessage': '',
+        'lastMessageAt': FieldValue.serverTimestamp(),
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      return docRef.id;
+    } catch (e) {
+      throw Exception('Failed to create conversation: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getUserConversations(
+    String userId,
+    bool isClient,
+  ) async {
+    try {
+      final field = isClient ? 'clientId' : 'providerId';
+      final snapshot = await _firestore
+          .collection(conversationsCollection)
+          .where(field, isEqualTo: userId)
+          .get();
+
+      final convs = snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      convs.sort((a, b) {
+        final at = a['lastMessageAt'];
+        final bt = b['lastMessageAt'];
+        final ams = at is Timestamp ? at.millisecondsSinceEpoch : 0;
+        final bms = bt is Timestamp ? bt.millisecondsSinceEpoch : 0;
+        return bms.compareTo(ams);
+      });
+      return convs;
+    } catch (e) {
+      throw Exception('Failed to fetch conversations: $e');
+    }
+  }
+
+  static Stream<List<Map<String, dynamic>>> streamUserConversations(
+    String userId,
+    bool isClient,
+  ) {
+    final field = isClient ? 'clientId' : 'providerId';
+    return _firestore
+        .collection(conversationsCollection)
+        .where(field, isEqualTo: userId)
+        .snapshots()
+        .map((snapshot) {
+          final convs = snapshot.docs
+              .map((doc) => {'id': doc.id, ...doc.data()})
+              .toList();
+          convs.sort((a, b) {
+            final at = a['lastMessageAt'];
+            final bt = b['lastMessageAt'];
+            final ams = at is Timestamp ? at.millisecondsSinceEpoch : 0;
+            final bms = bt is Timestamp ? bt.millisecondsSinceEpoch : 0;
+            return bms.compareTo(ams);
+          });
+          return convs;
+        });
+  }
+
+  static Future<void> sendMessage({
+    required String conversationId,
+    required String senderId,
+    required String content,
+  }) async {
+    try {
+      await _firestore
+          .collection(conversationsCollection)
+          .doc(conversationId)
+          .collection(messagesCollection)
+          .add({
+            'senderId': senderId,
+            'content': content,
+            'messageType': 'text',
+            'readBy': [senderId],
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+
+      await _firestore
+          .collection(conversationsCollection)
+          .doc(conversationId)
+          .update({
+            'lastMessage': content,
+            'lastMessageAt': FieldValue.serverTimestamp(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+    } catch (e) {
+      throw Exception('Failed to send message: $e');
+    }
+  }
+
+  static Stream<List<Map<String, dynamic>>> streamMessages(
+    String conversationId,
+  ) {
+    return _firestore
+        .collection(conversationsCollection)
+        .doc(conversationId)
+        .collection(messagesCollection)
+        .orderBy('createdAt')
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map((doc) => {'id': doc.id, ...doc.data()})
+              .toList(),
+        );
+  }
+
+  static Future<void> markMessagesAsRead({
+    required String conversationId,
+    required String readerId,
+  }) async {
+    try {
+      final snapshot = await _firestore
+          .collection(conversationsCollection)
+          .doc(conversationId)
+          .collection(messagesCollection)
+          .get();
+
+      final batch = _firestore.batch();
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        if ((data['senderId'] ?? '') == readerId) continue;
+        final readBy = List<String>.from(data['readBy'] ?? const []);
+        if (!readBy.contains(readerId)) {
+          batch.update(doc.reference, {
+            'readBy': [...readBy, readerId],
+          });
+        }
+      }
+      await batch.commit();
+    } catch (_) {
+      // Non-critical: read receipts should never block chat UI.
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // REVIEW OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<void> createReview({
+    required String bookingId,
+    required String clientId,
+    required String providerId,
+    required int rating,
+    required String reviewText,
+  }) async {
+    try {
+      await _firestore.collection(reviewsCollection).add({
+        'bookingId': bookingId,
+        'clientId': clientId,
+        'providerId': providerId,
+        'rating': rating.toDouble(),
+        'reviewText': reviewText,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      if (bookingId.isNotEmpty) {
+        try {
+          await _firestore
+              .collection(bookingsCollection)
+              .doc(bookingId)
+              .update({
+                'reviewed': true,
+                'reviewRating': rating,
+                'reviewedAt': FieldValue.serverTimestamp(),
+              });
+        } catch (_) {}
+      }
+
+      final reviews = await _firestore
+          .collection(reviewsCollection)
+          .where('providerId', isEqualTo: providerId)
+          .get();
+
+      if (reviews.docs.isNotEmpty) {
+        double sum = 0;
+        for (final doc in reviews.docs) {
+          sum += _toDouble(doc.data()['rating']);
+        }
+        final avg = sum / reviews.docs.length;
+        await _firestore.collection(providersCollection).doc(providerId).set({
+          'ratingAvg': avg,
+          'totalReviews': reviews.docs.length,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    } catch (e) {
+      throw Exception('Failed to create review: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getProviderReviews(
+    String providerId,
+  ) async {
+    try {
+      final snapshot = await _firestore
+          .collection(reviewsCollection)
+          .where('providerId', isEqualTo: providerId)
+          .get();
+
+      List<Map<String, dynamic>> output = [];
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final clientId = data['clientId'] as String? ?? '';
+
+        String name = 'Client';
+        if (clientId.isNotEmpty) {
+          final clientDoc = await _firestore
+              .collection(clientsCollection)
+              .doc(clientId)
+              .get();
+          name = clientDoc.data()?['displayName'] as String? ?? 'Client';
+        }
+
+        final parts = name.split(' ');
+        final initials = parts.length >= 2
+            ? '${parts.first[0]}${parts.last[0]}'.toUpperCase()
+            : name.isNotEmpty
+            ? name[0].toUpperCase()
+            : 'C';
+
+        output.add({
+          'id': doc.id,
+          'name': name,
+          'initials': initials,
+          'date': _formatDate(data['createdAt']),
+          'rating': _toDouble(data['rating']),
+          'text': (data['reviewText'] ?? '').toString(),
+          '_createdAt': data['createdAt'],
+        });
+      }
+
+      // Sort newest-first in Dart (avoids requiring a Firestore composite index)
+      output.sort((a, b) {
+        final aTs = a['_createdAt'];
+        final bTs = b['_createdAt'];
+        if (aTs is Timestamp && bTs is Timestamp) return bTs.compareTo(aTs);
+        return 0;
+      });
+      for (final item in output) {
+        item.remove('_createdAt');
+      }
+
+      return output;
+    } catch (e) {
+      throw Exception('Failed to fetch provider reviews: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // SESSION/CLEANUP OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<void> signOutCleanup(String userId) async {
+    try {
+      await _firestore.collection(usersCollection).doc(userId).set({
+        'isOnline': false,
+        'lastActive': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (_) {
+      // Avoid blocking sign-out for non-critical cleanup updates.
+    }
+  }
+
+  static double _toDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    if (value is String) {
+      final cleaned = value.replaceAll(RegExp(r'[^0-9.]'), '');
+      return double.tryParse(cleaned) ?? 0;
+    }
+    return 0;
+  }
+
+  static int _toInt(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) {
+      return int.tryParse(value.replaceAll(RegExp(r'[^0-9-]'), '')) ?? 0;
+    }
+    return 0;
+  }
+
+  static String _initialsFromName(String name) {
+    final parts = name.trim().split(RegExp(r'\s+'));
+    if (parts.isEmpty || parts.first.isEmpty) {
+      return 'P';
+    }
+    if (parts.length == 1) {
+      return parts.first[0].toUpperCase();
+    }
+    return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
+  }
+
+  static String _formatDate(dynamic timestamp) {
+    if (timestamp is! Timestamp) return '';
+    final dt = timestamp.toDate();
+    final y = dt.year.toString().padLeft(4, '0');
+    final m = dt.month.toString().padLeft(2, '0');
+    final d = dt.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
+  static void _sortByCreatedAtDesc(List<Map<String, dynamic>> items) {
+    items.sort((a, b) {
+      final aTs = a['createdAt'];
+      final bTs = b['createdAt'];
+      if (aTs is Timestamp && bTs is Timestamp) {
+        return bTs.compareTo(aTs);
+      }
+      if (aTs is Timestamp) return -1;
+      if (bTs is Timestamp) return 1;
+      return 0;
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // ADMIN OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<Map<String, int>> getAdminStats() async {
+    try {
+      final usersSnap = await _firestore.collection(usersCollection).get();
+      int totalUsers = 0, totalClients = 0, totalProviders = 0;
+      for (final doc in usersSnap.docs) {
+        final type = (doc.data()['userType'] ?? '').toString();
+        if (type == 'admin') continue;
+        totalUsers++;
+        if (type == 'client') totalClients++;
+        if (type == 'provider') totalProviders++;
+      }
+      final requestsSnap = await _firestore
+          .collection(requestsCollection)
+          .get();
+      final bookingsSnap = await _firestore
+          .collection(bookingsCollection)
+          .get();
+      final reportsSnap = await _firestore.collection(reportsCollection).get();
+      return {
+        'totalUsers': totalUsers,
+        'totalClients': totalClients,
+        'totalProviders': totalProviders,
+        'totalRequests': requestsSnap.docs.length,
+        'totalBookings': bookingsSnap.docs.length,
+        'totalReports': reportsSnap.docs.length,
+      };
+    } catch (e) {
+      throw Exception('Failed to fetch admin stats: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getAllUsers({
+    String? filterType,
+  }) async {
+    try {
+      Query query = _firestore.collection(usersCollection);
+      if (filterType != null && filterType != 'all') {
+        query = query.where('userType', isEqualTo: filterType);
+      }
+      final snap = await query.get();
+      final users = snap.docs
+          .map((doc) => {'id': doc.id, ...doc.data() as Map<String, dynamic>})
+          .where((u) => u['userType'] != 'admin')
+          .toList();
+      _sortByCreatedAtDesc(users);
+      return users;
+    } catch (e) {
+      throw Exception('Failed to fetch users: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getAllServiceRequests() async {
+    try {
+      final snap = await _firestore.collection(requestsCollection).get();
+      final requests = snap.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      _sortByCreatedAtDesc(requests);
+      return requests;
+    } catch (e) {
+      throw Exception('Failed to fetch all requests: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getAllBookings() async {
+    try {
+      final snap = await _firestore.collection(bookingsCollection).get();
+      final bookings = snap.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      _sortByCreatedAtDesc(bookings);
+      return bookings;
+    } catch (e) {
+      throw Exception('Failed to fetch all bookings: $e');
+    }
+  }
+
+  static Future<void> setUserActiveStatus(String userId, bool isActive) async {
+    try {
+      final updates = {
+        'isActive': isActive,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      await _firestore.collection(usersCollection).doc(userId).update(updates);
+      final userDoc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      if (userDoc.exists) {
+        final userType = (userDoc.data()?['userType'] ?? '').toString();
+        if (userType == 'client') {
+          await _firestore
+              .collection(clientsCollection)
+              .doc(userId)
+              .set(updates, SetOptions(merge: true));
+        } else if (userType == 'provider') {
+          await _firestore
+              .collection(providersCollection)
+              .doc(userId)
+              .set(updates, SetOptions(merge: true));
+        }
+      }
+    } catch (e) {
+      throw Exception('Failed to update user status: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // REPORT OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static const String reportsCollection = 'reports';
+
+  static Future<void> submitReport({
+    required String clientId,
+    required String clientName,
+    required String providerId,
+    required String providerName,
+    required String subject,
+    required String description,
+  }) async {
+    try {
+      await _firestore.collection(reportsCollection).add({
+        'clientId': clientId,
+        'clientName': clientName,
+        'providerId': providerId,
+        'providerName': providerName,
+        'subject': subject,
+        'description': description,
+        'status': 'pending',
+        'adminFeedback': '',
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception('Failed to submit report: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getAllReports() async {
+    try {
+      final snap = await _firestore.collection(reportsCollection).get();
+      final reports = snap.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      _sortByCreatedAtDesc(reports);
+      return reports;
+    } catch (e) {
+      throw Exception('Failed to fetch reports: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getClientReports(
+    String clientId,
+  ) async {
+    try {
+      final snap = await _firestore
+          .collection(reportsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .get();
+      final reports = snap.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
+      _sortByCreatedAtDesc(reports);
+      return reports;
+    } catch (e) {
+      throw Exception('Failed to fetch client reports: $e');
+    }
+  }
+
+  static Future<void> sendReportFeedback({
+    required String reportId,
+    required String feedback,
+  }) async {
+    try {
+      await _firestore.collection(reportsCollection).doc(reportId).update({
+        'adminFeedback': feedback,
+        'status': 'reviewed',
+        'feedbackAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception('Failed to send feedback: $e');
+    }
+  }
+
+  static Future<void> markNotificationAsRead(String reportId) async {
+    try {
+      await _firestore.collection(reportsCollection).doc(reportId).update({
+        'notificationRead': true,
+        'readAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception('Failed to mark notification as read: $e');
+    }
+  }
+
+  static Future<void> approveProvider(String userId, bool approved) async {
+    try {
+      final updates = {
+        'isApproved': approved,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      await _firestore
+          .collection(providersCollection)
+          .doc(userId)
+          .set(updates, SetOptions(merge: true));
+      await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .set(updates, SetOptions(merge: true));
+    } catch (e) {
+      throw Exception('Failed to update provider approval: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // NOTIFICATION OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<void> createNotification({
+    required String userId,
+    required String type,
+    required String title,
+    required String message,
+    String bookingId = '',
+    Map<String, dynamic>? extra,
+  }) async {
+    try {
+      await _firestore.collection(notificationsCollection).add({
+        'userId': userId,
+        'type': type,
+        'title': title,
+        'message': message,
+        'bookingId': bookingId,
+        'extra': extra ?? const {},
+        'read': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      // Notifications are best-effort; don't block the primary action.
+    }
+  }
+
+  static Stream<List<Map<String, dynamic>>> streamUserNotifications(
+    String userId,
+  ) {
+    return _firestore
+        .collection(notificationsCollection)
+        .where('userId', isEqualTo: userId)
+        .snapshots()
+        .map((snap) {
+          final list = snap.docs
+              .map((d) => {'id': d.id, ...d.data()})
+              .toList();
+          list.sort((a, b) {
+            final at = a['createdAt'];
+            final bt = b['createdAt'];
+            final ams = at is Timestamp ? at.millisecondsSinceEpoch : 0;
+            final bms = bt is Timestamp ? bt.millisecondsSinceEpoch : 0;
+            return bms.compareTo(ams);
+          });
+          return list;
+        });
+  }
+
+  static Future<int> getUnreadNotificationCount(String userId) async {
+    try {
+      final snap = await _firestore
+          .collection(notificationsCollection)
+          .where('userId', isEqualTo: userId)
+          .where('read', isEqualTo: false)
+          .get();
+      return snap.docs.length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static Future<void> markAppNotificationRead(String notificationId) async {
+    try {
+      await _firestore
+          .collection(notificationsCollection)
+          .doc(notificationId)
+          .update({
+            'read': true,
+            'readAt': FieldValue.serverTimestamp(),
+          });
+    } catch (_) {}
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // RATE / HOURS / PAYMENT HELPERS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<void> updateBookingRate({
+    required String bookingId,
+    required String newRate,
+  }) async {
+    try {
+      await _firestore.collection(bookingsCollection).doc(bookingId).update({
+        'agreedPrice': newRate,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception('Failed to update booking rate: $e');
+    }
+  }
+
+  static Future<void> submitHoursWorked({
+    required String bookingId,
+    required double hours,
+  }) async {
+    try {
+      final doc = await _firestore
+          .collection(bookingsCollection)
+          .doc(bookingId)
+          .get();
+      final rate = _toDouble(doc.data()?['agreedPrice']);
+      final total = rate * hours;
+      await _firestore.collection(bookingsCollection).doc(bookingId).update({
+        'hoursWorked': hours,
+        'totalAmount': total,
+        'status': 'awaiting_payment',
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      throw Exception('Failed to submit hours: $e');
+    }
+  }
+
+  static Future<void> markBookingPaid({required String bookingId}) async {
+    try {
+      await _firestore.collection(bookingsCollection).doc(bookingId).update({
+        'paid': true,
+        'status': 'completed',
+        'paidAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      final bookingDoc = await _firestore
+          .collection(bookingsCollection)
+          .doc(bookingId)
+          .get();
+      final data = bookingDoc.data() ?? {};
+      final providerId = (data['providerId'] ?? '').toString();
+      final requestId = (data['requestId'] ?? '').toString();
+      final total = _toDouble(data['totalAmount']);
+
+      if (requestId.isNotEmpty) {
+        await _firestore.collection(requestsCollection).doc(requestId).update({
+          'status': 'completed',
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (providerId.isNotEmpty) {
+        final providerRef = _firestore
+            .collection(providersCollection)
+            .doc(providerId);
+        await _firestore.runTransaction((tx) async {
+          final snap = await tx.get(providerRef);
+          final existing = _toDouble(snap.data()?['totalEarnings']);
+          final jobs = _toInt(
+            snap.data()?['jobsCompleted'] ?? snap.data()?['jobs'],
+          );
+          tx.set(providerRef, {
+            'totalEarnings': existing + total,
+            'jobsCompleted': jobs + 1,
+            'jobs': jobs + 1,
+            'totalJobs': jobs + 1,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        });
+      }
+    } catch (e) {
+      throw Exception('Failed to mark booking paid: $e');
+    }
+  }
+
+  static String _canonicalCategory(String raw) {
+    final s = raw.trim().toLowerCase();
+    if (s.isEmpty) return '';
+    if (s.contains('electric')) return 'electrician';
+    if (s.contains('plumb')) return 'plumber';
+    if (s.contains('clean')) return 'cleaner';
+    if (s.contains('paint')) return 'painter';
+    return s;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // ADMIN DASHBOARD ANALYTICS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<Map<String, dynamic>> getAdminDashboardStats() async {
+    final now = DateTime.now();
+    final todayStart = DateTime(now.year, now.month, now.day);
+    final monthStart = DateTime(now.year, now.month, 1);
+
+    final results = await Future.wait([
+      _firestore.collection(usersCollection).get(),
+      _firestore.collection(requestsCollection).get(),
+      _firestore.collection(bookingsCollection).get(),
+      _firestore.collection(reportsCollection).get(),
+      _firestore.collection(reviewsCollection).get(),
+      _firestore.collection(providersCollection).get(),
+    ]);
+
+    final usersSnap = results[0];
+    final bookingsSnap = results[2];
+    final reportsSnap = results[3];
+    final reviewsSnap = results[4];
+
+    int totalUsers = 0, totalClients = 0, totalProviders = 0;
+    int newUsersThisMonth = 0;
+    for (final doc in usersSnap.docs) {
+      final data = doc.data();
+      final type = (data['userType'] ?? '').toString();
+      if (type == 'admin') continue;
+      totalUsers++;
+      if (type == 'client') totalClients++;
+      if (type == 'provider') totalProviders++;
+      final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
+      if (createdAt != null && createdAt.isAfter(monthStart)) newUsersThisMonth++;
+    }
+
+    int bookingsToday = 0, completedBookings = 0, newBookingsThisMonth = 0;
+    final Map<String, int> categoryCount = {};
+    for (final doc in bookingsSnap.docs) {
+      final data = doc.data();
+      final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
+      if (createdAt != null && createdAt.isAfter(todayStart)) bookingsToday++;
+      if (createdAt != null && createdAt.isAfter(monthStart)) newBookingsThisMonth++;
+      if ((data['status'] ?? '') == 'completed') completedBookings++;
+      final rawCat = (data['specialty'] ?? data['category'] ?? data['serviceType'] ?? '').toString();
+      final cat = _normalizeCategoryLabel(rawCat);
+      categoryCount[cat] = (categoryCount[cat] ?? 0) + 1;
+    }
+
+    int newProvidersThisMonth = 0, activeProviders = 0;
+    final providersSnap = results[5];
+    for (final doc in providersSnap.docs) {
+      final data = doc.data();
+      final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
+      if (createdAt != null && createdAt.isAfter(monthStart)) newProvidersThisMonth++;
+      if (data['isActive'] == true) activeProviders++;
+    }
+
+    int resolvedReports = 0;
+    for (final doc in reportsSnap.docs) {
+      if ((doc.data()['status'] ?? '') == 'reviewed') resolvedReports++;
+    }
+
+    double totalRating = 0;
+    for (final doc in reviewsSnap.docs) {
+      totalRating += ((doc.data()['rating'] ?? 0) as num).toDouble();
+    }
+    final totalReviews = reviewsSnap.docs.length;
+    final avgRating = totalReviews == 0 ? 0.0 : totalRating / totalReviews;
+
+    final totalBookings = bookingsSnap.docs.length;
+    final totalReports = reportsSnap.docs.length;
+    final bookingCompletionPct = totalBookings == 0 ? 0 : (completedBookings * 100 ~/ totalBookings);
+    final resolvedReportsPct = totalReports == 0 ? 0 : (resolvedReports * 100 ~/ totalReports);
+    final activeProviderPct = totalProviders == 0 ? 0 : (activeProviders * 100 ~/ totalProviders);
+
+    return {
+      'totalUsers': totalUsers,
+      'totalClients': totalClients,
+      'totalProviders': totalProviders,
+      'activeProviders': activeProviders,
+      'totalRequests': results[1].docs.length,
+      'totalBookings': totalBookings,
+      'completedBookings': completedBookings,
+      'totalReports': totalReports,
+      'resolvedReports': resolvedReports,
+      'totalReviews': totalReviews,
+      'bookingsToday': bookingsToday,
+      'newUsersThisMonth': newUsersThisMonth,
+      'newProvidersThisMonth': newProvidersThisMonth,
+      'newBookingsThisMonth': newBookingsThisMonth,
+      'bookingCompletionPct': bookingCompletionPct,
+      'activeProviderPct': activeProviderPct,
+      'resolvedReportsPct': resolvedReportsPct,
+      'avgRating': avgRating,
+      'categoryBreakdown': categoryCount,
+    };
+  }
+
+  static String _normalizeCategoryLabel(String raw) {
+    final s = raw.trim().toLowerCase();
+    if (s.contains('plumb')) return 'Plumbing';
+    if (s.contains('clean')) return 'Cleaning';
+    if (s.contains('electric')) return 'Electrical';
+    if (s.contains('paint')) return 'Painter';
+    if (s.isEmpty) return 'Other';
+    // Title-case the raw value so counts merge correctly
+    return raw.trim().isEmpty ? 'Other' : raw.trim()[0].toUpperCase() + raw.trim().substring(1).toLowerCase();
+  }
+
+  static Future<List<Map<String, dynamic>>> getRecentActivities({int limit = 8}) async {
+    // Fetch without orderBy to avoid requiring composite Firestore indexes.
+    // Each collection is fetched independently; results are merged and sorted client-side.
+    final activities = <Map<String, dynamic>>[];
+    final fetchCount = limit * 3;
+
+    Future<List<Map<String, dynamic>>> safeFetch(String collection) async {
+      try {
+        final snap = await _firestore.collection(collection).limit(fetchCount).get();
+        return snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
+      } catch (_) {
+        return [];
+      }
+    }
+
+    final results = await Future.wait([
+      safeFetch(bookingsCollection),
+      safeFetch(reportsCollection),
+      safeFetch(usersCollection),
+      safeFetch(reviewsCollection),
+    ]);
+
+    // Bookings
+    for (final data in results[0]) {
+      activities.add({
+        'type': 'booking',
+        'name': (data['clientName'] ?? 'Unknown').toString(),
+        'subtitle': 'New booking created',
+        'timestamp': data['createdAt'],
+      });
+    }
+
+    // Reports
+    for (final data in results[1]) {
+      activities.add({
+        'type': 'report',
+        'name': (data['clientName'] ?? 'Unknown').toString(),
+        'subtitle': 'Complaint raised',
+        'timestamp': data['createdAt'],
+      });
+    }
+
+    // Users
+    for (final data in results[2]) {
+      if ((data['userType'] ?? '') == 'admin') continue;
+      final isProvider = data['userType'] == 'provider';
+      activities.add({
+        'type': isProvider ? 'provider' : 'user',
+        'name': (data['displayName'] ?? 'Unknown').toString(),
+        'subtitle': isProvider ? 'Provider registered' : 'New user joined',
+        'timestamp': data['createdAt'],
+      });
+    }
+
+    // Reviews
+    for (final data in results[3]) {
+      activities.add({
+        'type': 'review',
+        'name': (data['clientName'] ?? data['reviewerName'] ?? 'Unknown').toString(),
+        'subtitle': 'Review submitted',
+        'timestamp': data['createdAt'],
+      });
+    }
+
+    // Sort newest-first client-side
+    activities.sort((a, b) {
+      final ta = a['timestamp'];
+      final tb = b['timestamp'];
+      if (ta == null && tb == null) return 0;
+      if (ta == null) return 1;
+      if (tb == null) return -1;
+      final msA = ta is Timestamp ? ta.millisecondsSinceEpoch : 0;
+      final msB = tb is Timestamp ? tb.millisecondsSinceEpoch : 0;
+      return msB.compareTo(msA);
+    });
+
+    return activities.take(limit).toList();
+  }
+}

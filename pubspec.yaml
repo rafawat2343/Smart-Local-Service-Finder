@@ -1,0 +1,39 @@
+name: local_service_finder
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  shared_preferences: ^2.5.5
+  camera: ^0.12.0
+  image_picker: ^1.2.1
+  firebase_core: ^4.7.0
+  firebase_auth: ^6.4.0
+  cloud_firestore: ^6.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  image_path: "assets/images/app_icon/Icon2.png"
+  min_sdk_android: 21
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/app_icon/app_icon.png
+    - assets/images/Local_Background_Image.png
+    - assets/images/app_icon/Icon2.png
+    - assets/images/Splash_screen_Background_image.png

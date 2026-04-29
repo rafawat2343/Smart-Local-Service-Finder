@@ -1,0 +1,405 @@
+import 'dart:math' as math;
+import 'package:flutter/material.dart';
+import '../../utils/app_colors.dart';
+import 'admin_records_screen.dart';
+
+class AdminCategoryScreen extends StatelessWidget {
+  final Map<String, dynamic> stats;
+  const AdminCategoryScreen({super.key, required this.stats});
+
+  static const _categories = [
+    _CatConfig('Plumbing',   Icons.water_drop_rounded,   Color(0xFF4B91F1), Color(0xFFEAF2FF)),
+    _CatConfig('Cleaning',   Icons.cleaning_services_rounded, Color(0xFF2ECC71), Color(0xFFE9FAF0)),
+    _CatConfig('Electrical', Icons.bolt_rounded,          Color(0xFFE67E22), Color(0xFFFEF3E7)),
+    _CatConfig('Painter',    Icons.format_paint_rounded,  Color(0xFF9B59B6), Color(0xFFF4E8F9)),
+  ];
+
+  List<_CatData> _buildData() {
+    final raw = (stats['categoryBreakdown'] as Map?)?.cast<String, int>() ?? {};
+
+    // Merge real data into canonical buckets
+    final Map<String, int> merged = {for (final c in _categories) c.name: 0};
+    for (final e in raw.entries) {
+      final s = e.key.toLowerCase();
+      if (s.contains('plumb')) {
+        merged['Plumbing'] = (merged['Plumbing'] ?? 0) + e.value;
+      } else if (s.contains('clean')) {
+        merged['Cleaning'] = (merged['Cleaning'] ?? 0) + e.value;
+      } else if (s.contains('electric')) {
+        merged['Electrical'] = (merged['Electrical'] ?? 0) + e.value;
+      } else {
+        // Painter / Other / unknown → Painter bucket
+        merged['Painter'] = (merged['Painter'] ?? 0) + e.value;
+      }
+    }
+
+    final total = merged.values.fold(0, (s, v) => s + v);
+
+    // Fallback sample data when no real bookings exist
+    if (total == 0) {
+      return [
+        _CatData(_categories[0], 32, 32),
+        _CatData(_categories[1], 28, 28),
+        _CatData(_categories[2], 18, 18),
+        _CatData(_categories[3], 22, 22),
+      ];
+    }
+
+    return _categories.map((cfg) {
+      final count = merged[cfg.name] ?? 0;
+      final pct = (count * 100 ~/ total).clamp(0, 100);
+      return _CatData(cfg, count, pct);
+    }).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final data = _buildData();
+    final totalBookings = (stats['totalBookings'] as int?) ?? 0;
+    final maxPct = data.fold(0, (m, d) => math.max(m, d.percent));
+
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      appBar: AppBar(
+        backgroundColor: AppColors.surface,
+        elevation: 0,
+        surfaceTintColor: Colors.transparent,
+        leading: IconButton(
+          onPressed: () => Navigator.pop(context),
+          icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
+        ),
+        title: const Text(
+          'Category Breakdown',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w800,
+            color: AppColors.textPrimary,
+            letterSpacing: -0.3,
+          ),
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(height: 1, color: AppColors.border),
+        ),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            // Summary header card
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF1C2B3A), Color(0xFF0F1F2D)],
+                ),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Total Bookings',
+                          style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '$totalBookings',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 36,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: -1,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          'Across all service categories',
+                          style: TextStyle(
+                              color: Colors.white54, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(
+                    Icons.pie_chart_rounded,
+                    size: 60,
+                    color: Colors.white10,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Vertical bar chart
+            Container(
+              padding: const EdgeInsets.all(18),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Distribution Chart',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _BigVerticalChart(data: data, maxPct: maxPct),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Category detail cards
+            ...data.map((d) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _CategoryDetailCard(
+                    data: d,
+                    onViewRecords: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const AdminRecordsScreen()),
+                    ),
+                  ),
+                )),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Big vertical bar chart ─────────────────────────────────────────────────
+
+class _BigVerticalChart extends StatelessWidget {
+  final List<_CatData> data;
+  final int maxPct;
+  const _BigVerticalChart({required this.data, required this.maxPct});
+
+  @override
+  Widget build(BuildContext context) {
+    const barAreaH = 140.0;
+    final effectiveMax = maxPct == 0 ? 1 : maxPct;
+
+    return Column(
+      children: [
+        // Value labels
+        Row(
+          children: data.asMap().entries.map((e) {
+            final isLast = e.key == data.length - 1;
+            final d = e.value;
+            return Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(right: isLast ? 0 : 12),
+                child: Text(
+                  '${d.percent}%',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: d.cfg.color,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 4),
+        // Bars
+        SizedBox(
+          height: barAreaH,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: data.asMap().entries.map((e) {
+              final isLast = e.key == data.length - 1;
+              final d = e.value;
+              final barH =
+                  (d.percent / effectiveMax * barAreaH).clamp(4.0, barAreaH);
+              return Expanded(
+                child: Padding(
+                  padding: EdgeInsets.only(right: isLast ? 0 : 12),
+                  child: ClipRRect(
+                    borderRadius:
+                        const BorderRadius.vertical(top: Radius.circular(6)),
+                    child: Container(
+                      height: barH,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
+                          colors: [
+                            d.cfg.color,
+                            d.cfg.color.withOpacity(0.65),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        const SizedBox(height: 8),
+        // Category labels with icon
+        Row(
+          children: data.asMap().entries.map((e) {
+            final isLast = e.key == data.length - 1;
+            final d = e.value;
+            return Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(right: isLast ? 0 : 12),
+                child: Column(
+                  children: [
+                    Icon(d.cfg.icon, size: 16, color: d.cfg.color),
+                    const SizedBox(height: 2),
+                    Text(
+                      d.cfg.name,
+                      style: const TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textSecondary,
+                      ),
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Category detail card ───────────────────────────────────────────────────
+
+class _CategoryDetailCard extends StatelessWidget {
+  final _CatData data;
+  final VoidCallback onViewRecords;
+  const _CategoryDetailCard({required this.data, required this.onViewRecords});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.navy.withOpacity(0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                    color: data.cfg.bg,
+                    borderRadius: BorderRadius.circular(10)),
+                child: Icon(data.cfg.icon, color: data.cfg.color, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      data.cfg.name,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.textPrimary,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                    Text(
+                      '${data.count} booking${data.count == 1 ? '' : 's'}',
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    '${data.percent}%',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      color: data.cfg.color,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: onViewRecords,
+                    child: Text(
+                      'View records',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: data.cfg.color,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(5),
+            child: LinearProgressIndicator(
+              value: data.percent / 100,
+              minHeight: 8,
+              backgroundColor: AppColors.background,
+              valueColor: AlwaysStoppedAnimation<Color>(data.cfg.color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Data models ────────────────────────────────────────────────────────────
+
+class _CatConfig {
+  final String name;
+  final IconData icon;
+  final Color color, bg;
+  const _CatConfig(this.name, this.icon, this.color, this.bg);
+}
+
+class _CatData {
+  final _CatConfig cfg;
+  final int count, percent;
+  const _CatData(this.cfg, this.count, this.percent);
+}

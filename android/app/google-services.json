@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "991426880718",
+    "project_id": "local-service-finder-df56c",
+    "storage_bucket": "local-service-finder-df56c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:991426880718:android:9303fd2b8d058978261c9f",
+        "android_client_info": {
+          "package_name": "com.example.local_service_finder"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBqpkB_AMqP4fAUV5vwsuWILTVyLkMCo4g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
