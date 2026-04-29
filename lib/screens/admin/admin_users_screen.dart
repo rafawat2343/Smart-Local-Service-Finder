@@ -70,6 +70,54 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
     _filtered = list;
   }
 
+  Future<void> _deleteUser(Map<String, dynamic> user) async {
+    final name = (user['displayName'] ?? 'this user').toString();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Account'),
+        content: Text(
+          'Are you sure you want to permanently delete $name\'s account?\n\nThis action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      final userId = user['id'].toString();
+      final userType = (user['userType'] ?? 'client').toString();
+      await DatabaseService.deleteUser(userId, userType);
+      await _loadUsers();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Account deleted successfully.'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
   Future<void> _toggleActive(Map<String, dynamic> user) async {
     final currentlyActive = user['isActive'] as bool? ?? true;
     final action = currentlyActive ? 'deactivate' : 'activate';
@@ -135,6 +183,10 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
           Navigator.pop(context);
           _toggleActive(user);
         },
+        onDelete: () {
+          Navigator.pop(context);
+          _deleteUser(user);
+        },
       ),
     );
   }
@@ -162,6 +214,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
                           itemBuilder: (_, i) => _UserCard(
                             user: _filtered[i],
                             onToggle: () => _toggleActive(_filtered[i]),
+                            onDelete: () => _deleteUser(_filtered[i]),
                             onTap: () => _showUserDetails(_filtered[i]),
                           ),
                         ),
@@ -384,11 +437,13 @@ class _FilterChip extends StatelessWidget {
 class _UserCard extends StatelessWidget {
   final Map<String, dynamic> user;
   final VoidCallback onToggle;
+  final VoidCallback onDelete;
   final VoidCallback onTap;
 
   const _UserCard({
     required this.user,
     required this.onToggle,
+    required this.onDelete,
     required this.onTap,
   });
 
@@ -488,33 +543,65 @@ class _UserCard extends StatelessWidget {
                 ],
               ),
             ),
-            GestureDetector(
-              onTap: onToggle,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: isActive
-                      ? Colors.red.withOpacity(0.08)
-                      : Colors.green.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: isActive
-                        ? Colors.red.withOpacity(0.3)
-                        : Colors.green.withOpacity(0.3),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Deactivate / Activate
+                GestureDetector(
+                  onTap: onToggle,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: isActive
+                          ? Colors.red.withOpacity(0.08)
+                          : Colors.green.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: isActive
+                            ? Colors.red.withOpacity(0.3)
+                            : Colors.green.withOpacity(0.3),
+                      ),
+                    ),
+                    child: Text(
+                      isActive ? 'Deactivate' : 'Activate',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: isActive ? Colors.red.shade600 : Colors.green.shade700,
+                      ),
+                    ),
                   ),
                 ),
-                child: Text(
-                  isActive ? 'Deactivate' : 'Activate',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: isActive
-                        ? Colors.red.shade600
-                        : Colors.green.shade700,
+                const SizedBox(height: 6),
+                // Delete
+                GestureDetector(
+                  onTap: onDelete,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.red.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.red.withOpacity(0.4)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.delete_outline_rounded,
+                            size: 12, color: Colors.red.shade700),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Delete',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.red.shade700,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
+              ],
             ),
           ],
         ),
@@ -530,11 +617,13 @@ class _UserDetailSheet extends StatefulWidget {
   final String userId;
   final String userType;
   final VoidCallback onToggle;
+  final VoidCallback onDelete;
 
   const _UserDetailSheet({
     required this.userId,
     required this.userType,
     required this.onToggle,
+    required this.onDelete,
   });
 
   @override
@@ -697,22 +786,21 @@ class _UserDetailSheetState extends State<_UserDetailSheet> {
                                   (_data!['password'] ?? '').toString()),
                             ]),
                             const SizedBox(height: 24),
+                            // Deactivate / Activate
                             GestureDetector(
                               onTap: widget.onToggle,
                               child: Container(
                                 width: double.infinity,
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 13),
+                                padding: const EdgeInsets.symmetric(vertical: 13),
                                 decoration: BoxDecoration(
                                   color: (_data!['isActive'] as bool? ?? true)
                                       ? Colors.red.withOpacity(0.08)
                                       : Colors.green.withOpacity(0.08),
                                   borderRadius: BorderRadius.circular(10),
                                   border: Border.all(
-                                    color:
-                                        (_data!['isActive'] as bool? ?? true)
-                                            ? Colors.red.withOpacity(0.4)
-                                            : Colors.green.withOpacity(0.4),
+                                    color: (_data!['isActive'] as bool? ?? true)
+                                        ? Colors.red.withOpacity(0.4)
+                                        : Colors.green.withOpacity(0.4),
                                   ),
                                 ),
                                 alignment: Alignment.center,
@@ -723,11 +811,41 @@ class _UserDetailSheetState extends State<_UserDetailSheet> {
                                   style: TextStyle(
                                     fontSize: 14,
                                     fontWeight: FontWeight.w700,
-                                    color:
-                                        (_data!['isActive'] as bool? ?? true)
-                                            ? Colors.red.shade600
-                                            : Colors.green.shade700,
+                                    color: (_data!['isActive'] as bool? ?? true)
+                                        ? Colors.red.shade600
+                                        : Colors.green.shade700,
                                   ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            // Delete Account
+                            GestureDetector(
+                              onTap: widget.onDelete,
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(vertical: 13),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.shade700.withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: Colors.red.shade700.withOpacity(0.5)),
+                                ),
+                                alignment: Alignment.center,
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(Icons.delete_forever_rounded,
+                                        size: 18, color: Colors.red.shade700),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Delete Account Permanently',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.red.shade700,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),
