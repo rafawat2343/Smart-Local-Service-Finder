@@ -1159,6 +1159,19 @@ class DatabaseService {
     }
   }
 
+  static Future<void> deleteUser(String userId, String userType) async {
+    try {
+      if (userType == 'client') {
+        await _firestore.collection(clientsCollection).doc(userId).delete();
+      } else if (userType == 'provider') {
+        await _firestore.collection(providersCollection).doc(userId).delete();
+      }
+      await _firestore.collection(usersCollection).doc(userId).delete();
+    } catch (e) {
+      throw Exception('Failed to delete user: $e');
+    }
+  }
+
   static Future<void> setUserActiveStatus(String userId, bool isActive) async {
     try {
       final updates = {
@@ -1580,6 +1593,177 @@ class DatabaseService {
     if (s.isEmpty) return 'Other';
     // Title-case the raw value so counts merge correctly
     return raw.trim().isEmpty ? 'Other' : raw.trim()[0].toUpperCase() + raw.trim().substring(1).toLowerCase();
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // REVENUE & EARNINGS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<Map<String, dynamic>> getRevenueData() async {
+    final results = await Future.wait([
+      _firestore.collection(bookingsCollection).get(),
+      _firestore.collection(usersCollection).get(),
+    ]);
+
+    final bookingsSnap = results[0];
+    final usersSnap = results[1];
+
+    final Map<String, Map<String, dynamic>> userMap = {};
+    for (final doc in usersSnap.docs) {
+      userMap[doc.id] = {'id': doc.id, ...doc.data()};
+    }
+
+    // Prepare last-6-months buckets
+    final now = DateTime.now();
+    final Map<String, double> monthlyAmounts = {};
+    final Map<String, int> monthlyCounts = {};
+    for (int i = 5; i >= 0; i--) {
+      final m = DateTime(now.year, now.month - i, 1);
+      final key =
+          '${m.year}-${m.month.toString().padLeft(2, '0')}';
+      monthlyAmounts[key] = 0;
+      monthlyCounts[key] = 0;
+    }
+
+    final Map<String, double> providerEarnings = {};
+    final Map<String, int> providerJobCount = {};
+    final Map<String, double> clientSpending = {};
+    final Map<String, int> clientJobCount = {};
+    final Map<String, List<Map<String, dynamic>>> providerTxns = {};
+    final Map<String, List<Map<String, dynamic>>> clientTxns = {};
+    double totalRevenue = 0;
+
+    for (final doc in bookingsSnap.docs) {
+      final data = doc.data();
+      final status = (data['status'] ?? '').toString();
+      if (status != 'completed') continue;
+
+      final amount = _toDouble(data['totalAmount']) > 0
+          ? _toDouble(data['totalAmount'])
+          : _toDouble(data['agreedPrice']);
+      if (amount <= 0) continue;
+
+      totalRevenue += amount;
+      final providerId = (data['providerId'] ?? '').toString();
+      final clientId = (data['clientId'] ?? '').toString();
+      final createdAt = data['createdAt'] as Timestamp?;
+
+      if (createdAt != null) {
+        final dt = createdAt.toDate();
+        final key =
+            '${dt.year}-${dt.month.toString().padLeft(2, '0')}';
+        if (monthlyAmounts.containsKey(key)) {
+          monthlyAmounts[key] = (monthlyAmounts[key] ?? 0) + amount;
+          monthlyCounts[key] = (monthlyCounts[key] ?? 0) + 1;
+        }
+      }
+
+      if (providerId.isNotEmpty) {
+        providerEarnings[providerId] =
+            (providerEarnings[providerId] ?? 0) + amount;
+        providerJobCount[providerId] =
+            (providerJobCount[providerId] ?? 0) + 1;
+        providerTxns.putIfAbsent(providerId, () => []).add({
+          'id': doc.id,
+          'amount': amount,
+          'clientId': clientId,
+          'createdAt': data['createdAt'],
+          'status': status,
+          'specialty': (data['specialty'] ?? data['serviceType'] ?? '').toString(),
+        });
+      }
+
+      if (clientId.isNotEmpty) {
+        clientSpending[clientId] =
+            (clientSpending[clientId] ?? 0) + amount;
+        clientJobCount[clientId] =
+            (clientJobCount[clientId] ?? 0) + 1;
+        clientTxns.putIfAbsent(clientId, () => []).add({
+          'id': doc.id,
+          'amount': amount,
+          'providerId': providerId,
+          'createdAt': data['createdAt'],
+          'status': status,
+          'specialty': (data['specialty'] ?? data['serviceType'] ?? '').toString(),
+        });
+      }
+    }
+
+    // Build user earnings list
+    final List<Map<String, dynamic>> userEarnings = [];
+
+    for (final entry in providerEarnings.entries) {
+      final user = userMap[entry.key] ?? {};
+      userEarnings.add({
+        'userId': entry.key,
+        'name': (user['displayName'] ?? 'Provider').toString(),
+        'type': 'provider',
+        'amount': entry.value,
+        'transactionCount': providerJobCount[entry.key] ?? 0,
+        'transactions': providerTxns[entry.key] ?? [],
+        'userMap': user,
+      });
+    }
+
+    for (final entry in clientSpending.entries) {
+      final user = userMap[entry.key] ?? {};
+      userEarnings.add({
+        'userId': entry.key,
+        'name': (user['displayName'] ?? 'Client').toString(),
+        'type': 'client',
+        'amount': entry.value,
+        'transactionCount': clientJobCount[entry.key] ?? 0,
+        'transactions': clientTxns[entry.key] ?? [],
+        'userMap': user,
+      });
+    }
+
+    userEarnings.sort((a, b) =>
+        (b['amount'] as double).compareTo(a['amount'] as double));
+
+    // Monthly list ordered
+    const monthNames = [
+      '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    final List<Map<String, dynamic>> monthlyRevenue =
+        monthlyAmounts.entries.map((e) {
+      final parts = e.key.split('-');
+      final month = int.parse(parts[1]);
+      final year = int.parse(parts[0]);
+      return {
+        'key': e.key,
+        'label': '${monthNames[month]} ${year.toString().substring(2)}',
+        'amount': e.value,
+        'count': monthlyCounts[e.key] ?? 0,
+      };
+    }).toList();
+    monthlyRevenue.sort(
+        (a, b) => (a['key'] as String).compareTo(b['key'] as String));
+
+    // Forecast: linear trend from last 2 non-zero months
+    double forecastNextMonth = 0;
+    double forecastGrowthPct = 0;
+    final nonZero = monthlyRevenue
+        .where((m) => (m['amount'] as double) > 0)
+        .toList();
+    if (nonZero.length >= 2) {
+      final last = (nonZero.last['amount'] as double);
+      final secondLast = (nonZero[nonZero.length - 2]['amount'] as double);
+      final rate = secondLast == 0 ? 0.0 : (last - secondLast) / secondLast;
+      forecastNextMonth = last * (1 + rate);
+      forecastGrowthPct = rate * 100;
+    } else if (nonZero.isNotEmpty) {
+      forecastNextMonth = (nonZero.last['amount'] as double);
+    }
+
+    return {
+      'totalRevenue': totalRevenue,
+      'forecastNextMonth': forecastNextMonth,
+      'forecastGrowthPct': forecastGrowthPct,
+      'userEarnings': userEarnings,
+      'monthlyRevenue': monthlyRevenue,
+    };
   }
 
   static Future<List<Map<String, dynamic>>> getRecentActivities({int limit = 8}) async {

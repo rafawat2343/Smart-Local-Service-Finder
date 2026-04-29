@@ -14,6 +14,7 @@ import 'admin_platform_health_screen.dart';
 import 'admin_profile_screen.dart';
 import 'admin_records_screen.dart';
 import 'admin_reports_screen.dart';
+import 'admin_revenue_screen.dart';
 import 'admin_settings_screen.dart';
 import 'admin_users_screen.dart';
 
@@ -285,6 +286,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         onTap: () => _navigate(const AdminListingsScreen()),
       ),
       _QuickNavData(
+        icon: Icons.account_balance_wallet_rounded,
+        label: 'Revenue',
+        count: _stats['completedBookings'] as int? ?? 0,
+        color: const Color(0xFF1A7A4A),
+        bg: const Color(0xFFE8F5EE),
+        onTap: () => _navigate(const AdminRevenueScreen()),
+      ),
+      _QuickNavData(
         icon: Icons.assignment_rounded,
         label: 'Records',
         count: ((_stats['totalRequests'] ?? 0) as int) +
@@ -303,14 +312,19 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       ),
     ];
 
-    return Row(
-      children: items
-          .map((d) => Expanded(child: Padding(
-                padding: EdgeInsets.only(
-                    right: items.indexOf(d) < items.length - 1 ? 10 : 0),
-                child: _QuickNavCard(data: d, loading: _loading),
-              )))
-          .toList(),
+    // Scrollable row so all 5 cards fit without squeezing
+    return SizedBox(
+      height: 100,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        clipBehavior: Clip.none,
+        itemCount: items.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        itemBuilder: (_, i) => SizedBox(
+          width: 78,
+          child: _QuickNavCard(data: items[i], loading: _loading),
+        ),
+      ),
     );
   }
 
