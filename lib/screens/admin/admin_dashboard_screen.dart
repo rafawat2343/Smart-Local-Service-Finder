@@ -314,14 +314,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
     // Scrollable row so all 5 cards fit without squeezing
     return SizedBox(
-      height: 100,
+      height: 104,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        clipBehavior: Clip.none,
         itemCount: items.length,
         separatorBuilder: (_, __) => const SizedBox(width: 10),
         itemBuilder: (_, i) => SizedBox(
-          width: 78,
+          width: 76,
           child: _QuickNavCard(data: items[i], loading: _loading),
         ),
       ),
@@ -846,7 +845,7 @@ class _QuickNavCard extends StatelessWidget {
     return GestureDetector(
       onTap: data.onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
         decoration: BoxDecoration(
           color: AppColors.surface,
           borderRadius: BorderRadius.circular(12),
@@ -863,19 +862,19 @@ class _QuickNavCard extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 44,
-              height: 44,
+              width: 36,
+              height: 36,
               decoration: BoxDecoration(
                 color: data.bg,
-                borderRadius: BorderRadius.circular(10),
+                borderRadius: BorderRadius.circular(9),
               ),
-              child: Icon(data.icon, color: data.color, size: 22),
+              child: Icon(data.icon, color: data.color, size: 18),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             loading
                 ? SizedBox(
-                    width: 14,
-                    height: 14,
+                    width: 12,
+                    height: 12,
                     child: CircularProgressIndicator(
                       strokeWidth: 1.5,
                       color: data.color,
@@ -884,10 +883,10 @@ class _QuickNavCard extends StatelessWidget {
                 : Text(
                     '${data.count}',
                     style: TextStyle(
-                      fontSize: 18,
+                      fontSize: 16,
                       fontWeight: FontWeight.w800,
                       color: data.color,
-                      letterSpacing: -0.4,
+                      letterSpacing: -0.3,
                     ),
                   ),
             const SizedBox(height: 2),
