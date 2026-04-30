@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/auth_service.dart';
 import '../../services/database_service.dart';
@@ -165,6 +167,20 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
     final servicesCtrl = TextEditingController(text: _services.join(', '));
     final availabilityCtrl = TextEditingController(text: _availabilityText);
     bool isAvailable = _isAvailable;
+
+    // Service Area state
+    double? sheetLat = (_profileData?['latitude'] as num?)?.toDouble();
+    double? sheetLng = (_profileData?['longitude'] as num?)?.toDouble();
+    int sheetRadius = (_profileData?['serviceRadiusKm'] as int?) ?? 5;
+    bool sheetFetchingLoc = false;
+    String locUpdatedAt = 'Never updated';
+    final dynamic locTs = _profileData?['locationUpdatedAt'];
+    if (locTs != null) {
+      try {
+        final dt = (locTs as Timestamp).toDate();
+        locUpdatedAt = '${dt.day}/${dt.month}/${dt.year}';
+      } catch (_) {}
+    }
 
     showModalBottomSheet(
       context: context,
@@ -435,6 +451,150 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                           ),
                         ),
                       ),
+                      const SizedBox(height: 16),
+
+                      const Text(
+                        'SERVICE AREA',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.8,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      GestureDetector(
+                        onTap: sheetFetchingLoc
+                            ? null
+                            : () async {
+                                setSheetState(() => sheetFetchingLoc = true);
+                                try {
+                                  LocationPermission perm =
+                                      await Geolocator.checkPermission();
+                                  if (perm == LocationPermission.denied) {
+                                    perm =
+                                        await Geolocator.requestPermission();
+                                  }
+                                  if (perm == LocationPermission.whileInUse ||
+                                      perm == LocationPermission.always) {
+                                    final pos =
+                                        await Geolocator.getCurrentPosition(
+                                      desiredAccuracy: LocationAccuracy.medium,
+                                    );
+                                    setSheetState(() {
+                                      sheetLat = pos.latitude;
+                                      sheetLng = pos.longitude;
+                                      sheetFetchingLoc = false;
+                                    });
+                                  } else {
+                                    setSheetState(
+                                      () => sheetFetchingLoc = false,
+                                    );
+                                  }
+                                } catch (_) {
+                                  setSheetState(
+                                    () => sheetFetchingLoc = false,
+                                  );
+                                }
+                              },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceAlt,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: AppColors.border),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                sheetLat != null
+                                    ? Icons.location_on_rounded
+                                    : Icons.location_off_outlined,
+                                size: 18,
+                                color: sheetLat != null
+                                    ? AppColors.accent
+                                    : AppColors.textSecondary,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  sheetFetchingLoc
+                                      ? 'Getting location...'
+                                      : sheetLat != null
+                                      ? 'Location set  '
+                                          '(${sheetLat!.toStringAsFixed(4)}, '
+                                          '${sheetLng!.toStringAsFixed(4)})'
+                                      : 'Tap to update my location',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: sheetLat != null
+                                        ? AppColors.textPrimary
+                                        : AppColors.textTertiary,
+                                  ),
+                                ),
+                              ),
+                              if (sheetFetchingLoc)
+                                const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: AppColors.accent,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.radar_rounded,
+                            size: 16,
+                            color: AppColors.navy,
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'SERVICE RADIUS',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: AppColors.textSecondary,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.8,
+                            ),
+                          ),
+                          const Spacer(),
+                          Text(
+                            '$sheetRadius km',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              color: AppColors.navy,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: sheetRadius.toDouble(),
+                        min: 1,
+                        max: 25,
+                        divisions: 24,
+                        activeColor: AppColors.accent,
+                        inactiveColor: AppColors.border,
+                        onChanged: (v) =>
+                            setSheetState(() => sheetRadius = v.round()),
+                      ),
+                      Text(
+                        'Last updated: $locUpdatedAt',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppColors.textTertiary,
+                        ),
+                      ),
                       const SizedBox(height: 24),
 
                       SizedBox(
@@ -456,22 +616,30 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
 
                             // Write to Firestore first, then close sheet
                             try {
+                              final profileUpdates = <String, dynamic>{
+                                'isAvailable': isAvailable,
+                                'available': isAvailable,
+                                'availabilityText': newAvailabilityText,
+                                'availableText': newAvailabilityText,
+                                'aboutText': newAbout,
+                                'about': newAbout,
+                                'hourlyRate': newRate,
+                                'price': newRate,
+                                'services': servicesList,
+                                'servicesOffered': servicesList,
+                                'jobsCompleted': _totalJobs,
+                                'totalJobs': _totalJobs,
+                                'serviceRadiusKm': sheetRadius,
+                              };
+                              if (sheetLat != null && sheetLng != null) {
+                                profileUpdates['latitude'] = sheetLat!;
+                                profileUpdates['longitude'] = sheetLng!;
+                                profileUpdates['locationUpdatedAt'] =
+                                    FieldValue.serverTimestamp();
+                              }
                               await DatabaseService.updateProviderProfile(
                                 userId: userId,
-                                updates: {
-                                  'isAvailable': isAvailable,
-                                  'available': isAvailable,
-                                  'availabilityText': newAvailabilityText,
-                                  'availableText': newAvailabilityText,
-                                  'aboutText': newAbout,
-                                  'about': newAbout,
-                                  'hourlyRate': newRate,
-                                  'price': newRate,
-                                  'services': servicesList,
-                                  'servicesOffered': servicesList,
-                                  'jobsCompleted': _totalJobs,
-                                  'totalJobs': _totalJobs,
-                                },
+                                updates: profileUpdates,
                               );
                             } catch (e) {
                               if (mounted) {
@@ -500,6 +668,9 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                                   'price': newRate,
                                   'services': servicesList,
                                   'servicesOffered': servicesList,
+                                  'serviceRadiusKm': sheetRadius,
+                                  if (sheetLat != null) 'latitude': sheetLat!,
+                                  if (sheetLng != null) 'longitude': sheetLng!,
                                 };
                               });
                               // Reload from server to confirm
@@ -721,6 +892,83 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
         ),
       ),
     );
+  }
+
+  Future<void> _confirmDeleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded,
+                size: 22, color: Color(0xFFD94040)),
+            SizedBox(width: 10),
+            Text(
+              'Delete Account',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          'This will permanently delete your provider account and erase all '
+          'of your bookings, conversations, reviews and reports.\n\n'
+          'This action cannot be undone.',
+          style: TextStyle(
+            fontSize: 14,
+            color: AppColors.textSecondary,
+            height: 1.5,
+          ),
+        ),
+        actionsPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFD94040),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete Account'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final userId = AuthService.getCurrentUserId();
+    if (userId == null) return;
+
+    try {
+      await DatabaseService.deleteOwnAccountData(
+        userId: userId,
+        userType: 'provider',
+      );
+      await AuthService.signOut();
+      if (!mounted) return;
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const UserTypeScreen()),
+        (r) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Could not delete account: ${e.toString().replaceAll('Exception: ', '')}',
+          ),
+        ),
+      );
+    }
   }
 
   void _confirmLogout() {
@@ -1389,6 +1637,39 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                                 fontSize: 14,
                                 fontWeight: FontWeight.w700,
                                 color: Color(0xFFD94040),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // ── Delete Account (irreversible) ─────────────────────
+                    GestureDetector(
+                      onTap: _confirmDeleteAccount,
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFD94040),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.delete_forever_rounded,
+                              size: 18,
+                              color: Colors.white,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Delete Account',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
                               ),
                             ),
                           ],

@@ -3,7 +3,9 @@
     "allow": [
       "Bash(flutter analyze *)",
       "Bash(git init *)",
-      "Bash(git config *)"
+      "Bash(git config *)",
+      "Bash(flutter pub *)",
+      "Bash(git -C \"e:\\\\Rafawat\\\\CSE327\\\\Smart-Local-Service-Finder\" diff HEAD -- lib/services/database_service.dart)"
     ]
   }
 }

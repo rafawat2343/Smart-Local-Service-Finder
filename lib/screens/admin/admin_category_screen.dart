@@ -1,24 +1,38 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import '../../utils/app_colors.dart';
 import 'admin_records_screen.dart';
 
-class AdminCategoryScreen extends StatelessWidget {
+class AdminCategoryScreen extends StatefulWidget {
   final Map<String, dynamic> stats;
   const AdminCategoryScreen({super.key, required this.stats});
 
+  @override
+  State<AdminCategoryScreen> createState() => _AdminCategoryScreenState();
+}
+
+class _AdminCategoryScreenState extends State<AdminCategoryScreen> {
+  bool _exporting = false;
+
   static const _categories = [
-    _CatConfig('Plumbing',   Icons.water_drop_rounded,   Color(0xFF4B91F1), Color(0xFFEAF2FF)),
+    _CatConfig('Plumbing',   Icons.water_drop_rounded,        Color(0xFF4B91F1), Color(0xFFEAF2FF)),
     _CatConfig('Cleaning',   Icons.cleaning_services_rounded, Color(0xFF2ECC71), Color(0xFFE9FAF0)),
-    _CatConfig('Electrical', Icons.bolt_rounded,          Color(0xFFE67E22), Color(0xFFFEF3E7)),
-    _CatConfig('Painter',    Icons.format_paint_rounded,  Color(0xFF9B59B6), Color(0xFFF4E8F9)),
+    _CatConfig('Electrical', Icons.bolt_rounded,              Color(0xFFE67E22), Color(0xFFFEF3E7)),
+    _CatConfig('Painter',    Icons.format_paint_rounded,      Color(0xFF9B59B6), Color(0xFFF4E8F9)),
   ];
 
   List<_CatData> _buildData() {
-    final raw = (stats['categoryBreakdown'] as Map?)?.cast<String, int>() ?? {};
+    final raw = (widget.stats['categoryBreakdown'] as Map?)?.cast<String, int>() ?? {};
 
-    // Merge real data into canonical buckets
+    // Merge real data into canonical buckets. Only merge values whose label
+    // genuinely matches a known category — anything else stays in an "Other"
+    // counter we keep aside, so unknown labels don't get silently dumped into
+    // the Painter bucket (which produced the original miscategorization bug).
     final Map<String, int> merged = {for (final c in _categories) c.name: 0};
+    int other = 0;
     for (final e in raw.entries) {
       final s = e.key.toLowerCase();
       if (s.contains('plumb')) {
@@ -27,13 +41,14 @@ class AdminCategoryScreen extends StatelessWidget {
         merged['Cleaning'] = (merged['Cleaning'] ?? 0) + e.value;
       } else if (s.contains('electric')) {
         merged['Electrical'] = (merged['Electrical'] ?? 0) + e.value;
-      } else {
-        // Painter / Other / unknown → Painter bucket
+      } else if (s.contains('paint')) {
         merged['Painter'] = (merged['Painter'] ?? 0) + e.value;
+      } else {
+        other += e.value;
       }
     }
 
-    final total = merged.values.fold(0, (s, v) => s + v);
+    final total = merged.values.fold(0, (s, v) => s + v) + other;
 
     // Fallback sample data when no real bookings exist
     if (total == 0) {
@@ -52,10 +67,139 @@ class AdminCategoryScreen extends StatelessWidget {
     }).toList();
   }
 
+  Future<void> _exportPdf() async {
+    setState(() => _exporting = true);
+    try {
+      final data = _buildData();
+      final totalBookings = (widget.stats['totalBookings'] as int?) ?? 0;
+      final now = DateTime.now();
+      final dateStr =
+          '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+      final pdf = pw.Document();
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(36),
+          header: (_) => pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text(
+                    'Category Breakdown Report',
+                    style: pw.TextStyle(
+                        fontSize: 18, fontWeight: pw.FontWeight.bold),
+                  ),
+                  pw.Text(
+                    'Generated: $dateStr',
+                    style: const pw.TextStyle(
+                        fontSize: 9, color: PdfColors.grey700),
+                  ),
+                ],
+              ),
+              pw.Divider(color: PdfColors.purple700),
+              pw.SizedBox(height: 6),
+            ],
+          ),
+          build: (_) => [
+            pw.Container(
+              padding: const pw.EdgeInsets.all(14),
+              decoration: pw.BoxDecoration(
+                color: PdfColors.purple50,
+                borderRadius: pw.BorderRadius.circular(6),
+              ),
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('Total Bookings',
+                          style: const pw.TextStyle(
+                              fontSize: 9, color: PdfColors.grey700)),
+                      pw.SizedBox(height: 4),
+                      pw.Text('$totalBookings',
+                          style: pw.TextStyle(
+                              fontSize: 22,
+                              fontWeight: pw.FontWeight.bold)),
+                    ],
+                  ),
+                  pw.Text('Across all service categories',
+                      style: const pw.TextStyle(
+                          fontSize: 11, color: PdfColors.grey700)),
+                ],
+              ),
+            ),
+            pw.SizedBox(height: 20),
+            pw.Text('Distribution by Category',
+                style: pw.TextStyle(
+                    fontSize: 13, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 8),
+            pw.Table(
+              border: pw.TableBorder.all(
+                  color: PdfColors.grey300, width: 0.5),
+              columnWidths: {
+                0: const pw.FlexColumnWidth(3),
+                1: const pw.FlexColumnWidth(1.5),
+                2: const pw.FlexColumnWidth(1.5),
+              },
+              children: [
+                pw.TableRow(
+                  decoration:
+                      const pw.BoxDecoration(color: PdfColors.purple700),
+                  children: ['Category', 'Bookings', 'Share']
+                      .map((c) => pw.Padding(
+                            padding: const pw.EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 6),
+                            child: pw.Text(c,
+                                style: pw.TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: pw.FontWeight.bold,
+                                    color: PdfColors.white)),
+                          ))
+                      .toList(),
+                ),
+                ...data.map((d) => pw.TableRow(
+                      children: [
+                        d.cfg.name,
+                        '${d.count}',
+                        '${d.percent}%',
+                      ]
+                          .map((c) => pw.Padding(
+                                padding: const pw.EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 5),
+                                child: pw.Text(c,
+                                    style: const pw.TextStyle(fontSize: 9)),
+                              ))
+                          .toList(),
+                    )),
+              ],
+            ),
+          ],
+        ),
+      );
+
+      await Printing.sharePdf(
+        bytes: await pdf.save(),
+        filename: 'category_breakdown_$dateStr.pdf',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('PDF export failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final data = _buildData();
-    final totalBookings = (stats['totalBookings'] as int?) ?? 0;
+    final totalBookings = (widget.stats['totalBookings'] as int?) ?? 0;
     final maxPct = data.fold(0, (m, d) => math.max(m, d.percent));
 
     return Scaffold(
@@ -77,6 +221,47 @@ class AdminCategoryScreen extends StatelessWidget {
             letterSpacing: -0.3,
           ),
         ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: GestureDetector(
+              onTap: _exporting ? null : _exportPdf,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF9B59B6).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: const Color(0xFF9B59B6).withOpacity(0.4)),
+                ),
+                child: _exporting
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Color(0xFF9B59B6)),
+                      )
+                    : const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.picture_as_pdf_rounded,
+                              size: 14, color: Color(0xFF9B59B6)),
+                          SizedBox(width: 4),
+                          Text(
+                            'Export PDF',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF9B59B6),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+            ),
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Container(height: 1, color: AppColors.border),

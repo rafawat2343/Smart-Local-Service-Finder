@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../services/auth_service.dart';
 import '../../services/database_service.dart';
 import 'nid_ocr_service.dart';
@@ -399,7 +400,7 @@ class _StepNidScanState extends State<_StepNidScan> {
             color: AppColors.navy,
             bg: AppColors.navyLight,
             text:
-                'Scan or upload your National ID Card. OCR will auto-fill your Name, NID Number and Date of Birth.',
+                'NID scan is required to create an account. Your Name, NID Number and Date of Birth will be extracted automatically.',
           ),
           const SizedBox(height: 20),
 
@@ -449,11 +450,38 @@ class _StepNidScanState extends State<_StepNidScan> {
             const SizedBox(height: 20),
             _ExtractedPreview(data: _extracted),
             const SizedBox(height: 20),
-            AppButton(
-              label: 'Continue with Extracted Info',
-              icon: Icons.arrow_forward_rounded,
-              onTap: () => widget.onNext(_extracted),
-            ),
+
+            // All three fields must be present to continue.
+            if (_extracted.fullName.isNotEmpty &&
+                _extracted.nidNumber.isNotEmpty &&
+                _extracted.dateOfBirth.isNotEmpty)
+              AppButton(
+                label: 'Continue with Extracted Info',
+                icon: Icons.arrow_forward_rounded,
+                onTap: () => widget.onNext(_extracted),
+              )
+            else ...[
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFEEEE),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFD94040).withOpacity(0.4)),
+                ),
+                child: Row(
+                  children: const [
+                    Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFFD94040)),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Could not read all required fields. Please rescan with better lighting and the card held flat.',
+                        style: TextStyle(fontSize: 12, color: Color(0xFFD94040), height: 1.4),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 10),
             AppButton(
               label: 'Rescan',
@@ -465,22 +493,6 @@ class _StepNidScanState extends State<_StepNidScan> {
             ),
           ],
 
-          const SizedBox(height: 20),
-          Center(
-            child: GestureDetector(
-              onTap: () => widget.onNext(const NidData()),
-              child: const Text(
-                'Skip — fill in manually',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: AppColors.textSecondary,
-                  fontWeight: FontWeight.w500,
-                  decoration: TextDecoration.underline,
-                  decorationColor: AppColors.textSecondary,
-                ),
-              ),
-            ),
-          ),
           const SizedBox(height: 16),
         ],
       ),
@@ -1550,6 +1562,34 @@ class _StepOtpVerifyState extends State<_StepOtpVerify> {
         userId: userId,
         updates: {'location': widget.nidData.location},
       );
+    }
+
+    // Silently capture GPS; fall back to Dhaka centre if denied.
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      double lat, lng;
+      if (perm == LocationPermission.whileInUse ||
+          perm == LocationPermission.always) {
+        final pos = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.medium,
+        );
+        lat = pos.latitude;
+        lng = pos.longitude;
+      } else {
+        lat = 23.8103; // Dhaka default
+        lng = 90.4125;
+      }
+      await DatabaseService.updateUserLocation(
+        userId: userId,
+        latitude: lat,
+        longitude: lng,
+        isClient: widget.isClient,
+      );
+    } catch (_) {
+      // Non-fatal — app continues without location
     }
 
     if (!mounted) return;

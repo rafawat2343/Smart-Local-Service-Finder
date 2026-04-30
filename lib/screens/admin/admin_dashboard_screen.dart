@@ -12,10 +12,10 @@ import 'admin_listings_screen.dart';
 import 'admin_notifications_screen.dart';
 import 'admin_platform_health_screen.dart';
 import 'admin_profile_screen.dart';
+import 'admin_recent_activity_screen.dart';
 import 'admin_records_screen.dart';
 import 'admin_reports_screen.dart';
 import 'admin_revenue_screen.dart';
-import 'admin_settings_screen.dart';
 import 'admin_users_screen.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
@@ -346,7 +346,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               ),
             ),
             TextButton(
-              onPressed: _openNotifications,
+              onPressed: () => _navigate(const AdminRecentActivityScreen()),
               style: TextButton.styleFrom(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 minimumSize: Size.zero,
@@ -505,7 +505,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         MapEntry('Painter', 22),
       ];
     } else {
-      // Merge into canonical buckets
+      // Merge into canonical buckets — only known categories. Unknown labels
+      // are intentionally dropped instead of falling through to Painter
+      // (which previously caused electrician bookings to be counted as
+      // painting in the breakdown).
       final Map<String, int> merged = {for (final k in canonicalKeys) k: 0};
       for (final e in raw.entries) {
         final s = e.key.toLowerCase();
@@ -516,8 +519,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         } else if (s.contains('electric')) {
           merged['Electrical'] = (merged['Electrical'] ?? 0) + e.value;
         } else if (s.contains('paint')) {
-          merged['Painter'] = (merged['Painter'] ?? 0) + e.value;
-        } else {
           merged['Painter'] = (merged['Painter'] ?? 0) + e.value;
         }
       }
@@ -706,9 +707,6 @@ class _AdminAppBar extends StatelessWidget {
               if (value == 'profile') {
                 Navigator.push(context,
                     MaterialPageRoute(builder: (_) => const AdminProfileScreen()));
-              } else if (value == 'settings') {
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const AdminSettingsScreen()));
               } else if (value == 'signout') {
                 onSignOut();
               }
@@ -744,19 +742,6 @@ class _AdminAppBar extends StatelessWidget {
                         size: 18, color: AppColors.textSecondary),
                     SizedBox(width: 10),
                     Text('Profile',
-                        style: TextStyle(
-                            fontSize: 14, color: AppColors.textPrimary)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'settings',
-                child: Row(
-                  children: [
-                    Icon(Icons.settings_outlined,
-                        size: 18, color: AppColors.textSecondary),
-                    SizedBox(width: 10),
-                    Text('Settings',
                         style: TextStyle(
                             fontSize: 14, color: AppColors.textPrimary)),
                   ],

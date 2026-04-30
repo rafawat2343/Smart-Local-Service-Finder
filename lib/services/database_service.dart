@@ -60,7 +60,20 @@ class DatabaseService {
         'motherName': motherName,
         'password': password,
         'profileComplete': true,
+        'latitude': null,
+        'longitude': null,
+        'locationUpdatedAt': null,
+        if (!isClient) ...{
+          'serviceRadiusKm': 5,
+          // Providers must be approved by admin before they can sign in.
+          'isApproved': false,
+        },
       };
+      // Mirror approval state on the users doc so the login gate can read it
+      // without needing to fetch the role collection again.
+      if (!isClient) {
+        userData['isApproved'] = false;
+      }
 
       await _firestore
           .collection(roleCollection)
@@ -180,6 +193,56 @@ class DatabaseService {
       await _firestore.collection(usersCollection).doc(userId).update(updates);
     } catch (e) {
       throw Exception('Failed to update client profile: $e');
+    }
+  }
+
+  /// Store GPS coordinates for a user in both users and their role collection.
+  static Future<void> updateUserLocation({
+    required String userId,
+    required double latitude,
+    required double longitude,
+    required bool isClient,
+  }) async {
+    try {
+      final data = {
+        'latitude': latitude,
+        'longitude': longitude,
+        'locationUpdatedAt': FieldValue.serverTimestamp(),
+      };
+      await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .set(data, SetOptions(merge: true));
+      final roleCollection = isClient ? clientsCollection : providersCollection;
+      await _firestore
+          .collection(roleCollection)
+          .doc(userId)
+          .set(data, SetOptions(merge: true));
+    } catch (e) {
+      throw Exception('Failed to update location: $e');
+    }
+  }
+
+  /// Update the km radius a provider is willing to serve.
+  static Future<void> updateProviderServiceRadius({
+    required String userId,
+    required int radiusKm,
+  }) async {
+    try {
+      final data = {
+        'serviceRadiusKm': radiusKm,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      await _firestore
+          .collection(providersCollection)
+          .doc(userId)
+          .set(data, SetOptions(merge: true));
+      await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .set(data, SetOptions(merge: true));
+    } catch (e) {
+      throw Exception('Failed to update service radius: $e');
     }
   }
 
@@ -472,6 +535,8 @@ class DatabaseService {
     required String location,
     required String budget,
     required bool isUrgent,
+    double? latitude,
+    double? longitude,
   }) async {
     try {
       await _firestore.collection(requestsCollection).add({
@@ -483,6 +548,8 @@ class DatabaseService {
         'budget': budget,
         'isUrgent': isUrgent,
         'status': 'open',
+        if (latitude != null) 'latitude': latitude,
+        if (longitude != null) 'longitude': longitude,
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
@@ -580,9 +647,42 @@ class DatabaseService {
     required String agreedPrice,
     String description = '',
     String status = 'pending',
+    String specialty = '',
   }) async {
     try {
       final bookingRef = _firestore.collection(bookingsCollection).doc();
+
+      // Resolve specialty from the provider profile when caller didn't supply it,
+      // so the admin category breakdown can classify every booking accurately.
+      String resolvedSpecialty = specialty.trim();
+      if (resolvedSpecialty.isEmpty && providerId.isNotEmpty) {
+        try {
+          final providerDoc = await _firestore
+              .collection(providersCollection)
+              .doc(providerId)
+              .get();
+          final data = providerDoc.data();
+          resolvedSpecialty = (data?['specialty'] ??
+                  data?['serviceType'] ??
+                  '')
+              .toString();
+        } catch (_) {}
+      }
+      // Pull category from the request when this booking originated from one.
+      if (resolvedSpecialty.isEmpty && requestId.isNotEmpty) {
+        try {
+          final reqDoc = await _firestore
+              .collection(requestsCollection)
+              .doc(requestId)
+              .get();
+          final data = reqDoc.data();
+          resolvedSpecialty = (data?['category'] ??
+                  data?['categoryKey'] ??
+                  '')
+              .toString();
+        } catch (_) {}
+      }
+      final categoryKey = _canonicalCategory(resolvedSpecialty);
 
       await bookingRef.set({
         'requestId': requestId,
@@ -591,6 +691,10 @@ class DatabaseService {
         'agreedPrice': agreedPrice,
         'description': description,
         'status': status,
+        'specialty': resolvedSpecialty,
+        'serviceType': resolvedSpecialty,
+        'category': resolvedSpecialty,
+        'categoryKey': categoryKey,
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
@@ -1010,6 +1114,104 @@ class DatabaseService {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  // BOOKMARK OPERATIONS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static const String bookmarksCollection = 'bookmarks';
+
+  static Future<void> toggleBookmark(String clientId, String providerId) async {
+    if (clientId.isEmpty || providerId.isEmpty) return;
+    final ref = _firestore.collection(bookmarksCollection).doc(clientId);
+    try {
+      final doc = await ref.get();
+      final ids = List<String>.from(doc.data()?['providerIds'] ?? []);
+      if (ids.contains(providerId)) {
+        await ref.set({
+          'providerIds': FieldValue.arrayRemove([providerId]),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } else {
+        await ref.set({
+          'providerIds': FieldValue.arrayUnion([providerId]),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    } catch (e) {
+      throw Exception('Failed to toggle bookmark: $e');
+    }
+  }
+
+  static Future<bool> isBookmarked(String clientId, String providerId) async {
+    if (clientId.isEmpty || providerId.isEmpty) return false;
+    try {
+      final doc = await _firestore
+          .collection(bookmarksCollection)
+          .doc(clientId)
+          .get();
+      final ids = List<String>.from(doc.data()?['providerIds'] ?? []);
+      return ids.contains(providerId);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getBookmarkedProviders(
+    String clientId,
+  ) async {
+    if (clientId.isEmpty) return [];
+    try {
+      final doc = await _firestore
+          .collection(bookmarksCollection)
+          .doc(clientId)
+          .get();
+      final ids = List<String>.from(doc.data()?['providerIds'] ?? []);
+      if (ids.isEmpty) return [];
+      final results = <Map<String, dynamic>>[];
+      for (final id in ids) {
+        final profile = await getProviderProfile(id);
+        if (profile != null) {
+          results.add({'id': id, ...profile});
+        }
+      }
+      return results;
+    } catch (e) {
+      throw Exception('Failed to fetch bookmarked providers: $e');
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // LIVE CLIENT STATS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<Map<String, int>> getClientLiveStats(String clientId) async {
+    try {
+      final reqSnap = await _firestore
+          .collection(requestsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .get();
+
+      final completedSnap = await _firestore
+          .collection(bookingsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .where('status', isEqualTo: 'completed')
+          .get();
+
+      final reviewSnap = await _firestore
+          .collection(reviewsCollection)
+          .where('clientId', isEqualTo: clientId)
+          .get();
+
+      return {
+        'totalRequests': reqSnap.docs.length,
+        'completedBookings': completedSnap.docs.length,
+        'reviewsGiven': reviewSnap.docs.length,
+      };
+    } catch (_) {
+      return {'totalRequests': 0, 'completedBookings': 0, 'reviewsGiven': 0};
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
   // SESSION/CLEANUP OPERATIONS
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -1159,14 +1361,160 @@ class DatabaseService {
 
   static Future<void> deleteUser(String userId, String userType) async {
     try {
-      if (userType == 'client') {
-        await _firestore.collection(clientsCollection).doc(userId).delete();
-      } else if (userType == 'provider') {
-        await _firestore.collection(providersCollection).doc(userId).delete();
-      }
-      await _firestore.collection(usersCollection).doc(userId).delete();
+      await _cascadeDeleteUserData(userId, userType);
     } catch (e) {
       throw Exception('Failed to delete user: $e');
+    }
+  }
+
+  /// Permanently delete a user and every Firestore document linked to them.
+  /// Used by admin "Delete" and the in-app "Delete account" action.
+  static Future<void> _cascadeDeleteUserData(
+    String userId,
+    String userType,
+  ) async {
+    if (userId.isEmpty) return;
+
+    Future<void> deleteWhere(String coll, String field) async {
+      final snap = await _firestore
+          .collection(coll)
+          .where(field, isEqualTo: userId)
+          .get();
+      if (snap.docs.isEmpty) return;
+      // Firestore batches cap at 500 writes; chunk just in case.
+      for (var i = 0; i < snap.docs.length; i += 450) {
+        final end = (i + 450 < snap.docs.length) ? i + 450 : snap.docs.length;
+        final batch = _firestore.batch();
+        for (final doc in snap.docs.sublist(i, end)) {
+          batch.delete(doc.reference);
+        }
+        await batch.commit();
+      }
+    }
+
+    // Conversations + their message subcollections
+    Future<void> deleteConversations(String field) async {
+      final snap = await _firestore
+          .collection(conversationsCollection)
+          .where(field, isEqualTo: userId)
+          .get();
+      for (final conv in snap.docs) {
+        final msgs = await conv.reference.collection(messagesCollection).get();
+        for (var i = 0; i < msgs.docs.length; i += 450) {
+          final end =
+              (i + 450 < msgs.docs.length) ? i + 450 : msgs.docs.length;
+          final batch = _firestore.batch();
+          for (final m in msgs.docs.sublist(i, end)) {
+            batch.delete(m.reference);
+          }
+          await batch.commit();
+        }
+        await conv.reference.delete();
+      }
+    }
+
+    await deleteWhere(requestsCollection, 'clientId');
+    await deleteWhere(bookingsCollection, 'clientId');
+    await deleteWhere(bookingsCollection, 'providerId');
+    await deleteWhere(reviewsCollection, 'clientId');
+    await deleteWhere(reviewsCollection, 'providerId');
+    await deleteWhere(reportsCollection, 'clientId');
+    await deleteWhere(reportsCollection, 'providerId');
+    await deleteWhere(notificationsCollection, 'userId');
+    await deleteConversations('clientId');
+    await deleteConversations('providerId');
+
+    final batch = _firestore.batch();
+    if (userType == 'client') {
+      batch.delete(_firestore.collection(clientsCollection).doc(userId));
+    } else if (userType == 'provider') {
+      batch.delete(_firestore.collection(providersCollection).doc(userId));
+    } else {
+      // Caller didn't know — clean both just in case.
+      batch.delete(_firestore.collection(clientsCollection).doc(userId));
+      batch.delete(_firestore.collection(providersCollection).doc(userId));
+    }
+    batch.delete(_firestore.collection(usersCollection).doc(userId));
+    await batch.commit();
+  }
+
+  /// Cascade-delete the currently signed-in user's data. Wraps the same logic
+  /// as the admin delete, so client/provider profile "Delete account" actions
+  /// purge every linked document before we sign out and remove the auth user.
+  static Future<void> deleteOwnAccountData({
+    required String userId,
+    required String userType,
+  }) async {
+    try {
+      await _cascadeDeleteUserData(userId, userType);
+    } catch (e) {
+      throw Exception('Failed to delete account data: $e');
+    }
+  }
+
+  /// Returns approval/active state needed by the login screen to gate access.
+  /// Returns null if no user record exists (treated as "not signed up here").
+  static Future<Map<String, dynamic>?> getLoginGateInfo(String userId) async {
+    if (userId.isEmpty) return null;
+    try {
+      final userDoc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      if (!userDoc.exists) return null;
+      final data = userDoc.data() ?? {};
+      final type = (data['userType'] ?? '').toString();
+      bool? isApproved = data['isApproved'] as bool?;
+      // Fall back to the role collection for older accounts that don't
+      // carry the approval flag on the users doc.
+      if (type == 'provider' && isApproved == null) {
+        final p = await _firestore
+            .collection(providersCollection)
+            .doc(userId)
+            .get();
+        isApproved = p.data()?['isApproved'] as bool?;
+      }
+      return {
+        'userType': type,
+        'isActive': data['isActive'] as bool? ?? true,
+        'isApproved': isApproved ?? (type != 'provider'),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Re-activate a user after a successful login. Admin-deactivated accounts
+  /// remain hidden until the owner returns and signs in again.
+  static Future<void> activateUserOnLogin(String userId) async {
+    if (userId.isEmpty) return;
+    try {
+      final updates = {
+        'isActive': true,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .set(updates, SetOptions(merge: true));
+      final userDoc = await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .get();
+      final type = (userDoc.data()?['userType'] ?? '').toString();
+      if (type == 'client') {
+        await _firestore
+            .collection(clientsCollection)
+            .doc(userId)
+            .set(updates, SetOptions(merge: true));
+      } else if (type == 'provider') {
+        await _firestore
+            .collection(providersCollection)
+            .doc(userId)
+            .set(updates, SetOptions(merge: true));
+      }
+    } catch (_) {
+      // Non-critical: don't block login on this.
     }
   }
 
@@ -1519,6 +1867,19 @@ class DatabaseService {
       if (createdAt != null && createdAt.isAfter(monthStart)) newUsersThisMonth++;
     }
 
+    // Build a providerId → specialty index so we can correctly classify
+    // bookings whose own specialty/category fields were never recorded.
+    final providersSnap = results[5];
+    final Map<String, String> providerSpecialty = {};
+    for (final doc in providersSnap.docs) {
+      final data = doc.data();
+      final spec = (data['specialty'] ??
+              data['serviceType'] ??
+              '')
+          .toString();
+      if (spec.isNotEmpty) providerSpecialty[doc.id] = spec;
+    }
+
     int bookingsToday = 0, completedBookings = 0, newBookingsThisMonth = 0;
     final Map<String, int> categoryCount = {};
     for (final doc in bookingsSnap.docs) {
@@ -1527,13 +1888,27 @@ class DatabaseService {
       if (createdAt != null && createdAt.isAfter(todayStart)) bookingsToday++;
       if (createdAt != null && createdAt.isAfter(monthStart)) newBookingsThisMonth++;
       if ((data['status'] ?? '') == 'completed') completedBookings++;
-      final rawCat = (data['specialty'] ?? data['category'] ?? data['serviceType'] ?? '').toString();
+
+      var rawCat = (data['specialty'] ??
+              data['category'] ??
+              data['serviceType'] ??
+              data['categoryKey'] ??
+              '')
+          .toString();
+      if (rawCat.isEmpty) {
+        final pid = (data['providerId'] ?? '').toString();
+        if (pid.isNotEmpty) {
+          rawCat = providerSpecialty[pid] ?? '';
+        }
+      }
+      // Skip uncategorized bookings rather than dumping them into 'Other'
+      // (which the dashboard merges into Painter and produced the bug).
+      if (rawCat.isEmpty) continue;
       final cat = _normalizeCategoryLabel(rawCat);
       categoryCount[cat] = (categoryCount[cat] ?? 0) + 1;
     }
 
     int newProvidersThisMonth = 0, activeProviders = 0;
-    final providersSnap = results[5];
     for (final doc in providersSnap.docs) {
       final data = doc.data();
       final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
@@ -1786,23 +2161,38 @@ class DatabaseService {
       safeFetch(reviewsCollection),
     ]);
 
-    // Bookings
+    // Bookings — emit a "task complete" item separately so admin notifications
+    // can surface only feedback + completed tasks while the activity feed keeps
+    // the full history.
     for (final data in results[0]) {
+      final status = (data['status'] ?? '').toString();
       activities.add({
         'type': 'booking',
+        'status': status,
         'name': (data['clientName'] ?? 'Unknown').toString(),
-        'subtitle': 'New booking created',
-        'timestamp': data['createdAt'],
+        'subtitle': status == 'completed'
+            ? 'Task completed'
+            : 'New booking created',
+        'timestamp': status == 'completed'
+            ? (data['paidAt'] ?? data['updatedAt'] ?? data['createdAt'])
+            : data['createdAt'],
       });
     }
 
-    // Reports
+    // Reports — admin feedback flow. Status === 'reviewed' means the admin sent
+    // feedback to the complainant; surface that as an "upcoming feedback" item.
     for (final data in results[1]) {
+      final status = (data['status'] ?? '').toString();
       activities.add({
         'type': 'report',
+        'status': status,
         'name': (data['clientName'] ?? 'Unknown').toString(),
-        'subtitle': 'Complaint raised',
-        'timestamp': data['createdAt'],
+        'subtitle': status == 'reviewed'
+            ? 'Admin feedback sent'
+            : 'Complaint raised',
+        'timestamp': status == 'reviewed'
+            ? (data['feedbackAt'] ?? data['updatedAt'] ?? data['createdAt'])
+            : data['createdAt'],
       });
     }
 
@@ -1818,7 +2208,7 @@ class DatabaseService {
       });
     }
 
-    // Reviews
+    // Reviews — clients giving feedback to providers.
     for (final data in results[3]) {
       activities.add({
         'type': 'review',

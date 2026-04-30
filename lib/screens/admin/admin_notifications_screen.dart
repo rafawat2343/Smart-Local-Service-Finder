@@ -36,8 +36,20 @@ class _AdminNotificationsScreenState extends State<AdminNotificationsScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final items = await DatabaseService.getRecentActivities(limit: 30);
-      if (mounted) setState(() => _activities = items);
+      // Pull a generous batch and keep only the two notification kinds the
+      // admin bell is meant to surface: upcoming feedback (reviews + report
+      // feedback) and completed tasks.
+      final items =
+          await DatabaseService.getRecentActivities(limit: 200);
+      final filtered = items.where((item) {
+        final type = (item['type'] as String?) ?? '';
+        final status = (item['status'] as String?) ?? '';
+        if (type == 'review') return true; // feedback from clients
+        if (type == 'report' && status == 'reviewed') return true; // admin feedback sent
+        if (type == 'booking' && status == 'completed') return true; // task complete
+        return false;
+      }).toList();
+      if (mounted) setState(() => _activities = filtered);
     } catch (_) {
     } finally {
       if (mounted) setState(() => _loading = false);

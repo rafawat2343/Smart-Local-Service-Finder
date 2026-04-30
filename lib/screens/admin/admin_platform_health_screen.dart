@@ -1,12 +1,24 @@
 import 'package:flutter/material.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import '../../utils/app_colors.dart';
 
-class AdminPlatformHealthScreen extends StatelessWidget {
+class AdminPlatformHealthScreen extends StatefulWidget {
   final Map<String, dynamic> stats;
   const AdminPlatformHealthScreen({super.key, required this.stats});
 
   @override
-  Widget build(BuildContext context) {
+  State<AdminPlatformHealthScreen> createState() =>
+      _AdminPlatformHealthScreenState();
+}
+
+class _AdminPlatformHealthScreenState
+    extends State<AdminPlatformHealthScreen> {
+  bool _exporting = false;
+
+  List<_MetricCardData> _buildMetrics() {
+    final stats = widget.stats;
     final activeProvPct  = (stats['activeProviderPct']   as int?) ?? 0;
     final bookingCompPct = (stats['bookingCompletionPct'] as int?) ?? 0;
     final avgRating      = (stats['avgRating']           as double?) ?? 0.0;
@@ -21,7 +33,7 @@ class AdminPlatformHealthScreen extends StatelessWidget {
     final totalReviews     = (stats['totalReviews']     as int?) ?? 0;
     final ratingPct        = (avgRating / 5.0 * 100).round().clamp(0, 100);
 
-    final metrics = [
+    return [
       _MetricCardData(
         label: 'Active Providers',
         icon: Icons.construction_rounded,
@@ -48,7 +60,8 @@ class AdminPlatformHealthScreen extends StatelessWidget {
         color: const Color(0xFFE67E22),
         bg: const Color(0xFFFEF3E7),
         percent: ratingPct,
-        displayValue: avgRating == 0.0 ? 'N/A' : '${avgRating.toStringAsFixed(1)} / 5',
+        displayValue:
+            avgRating == 0.0 ? 'N/A' : '${avgRating.toStringAsFixed(1)} / 5',
         detail: 'Based on $totalReviews review${totalReviews == 1 ? '' : 's'}',
         status: avgRating == 0.0
             ? 'No data'
@@ -71,9 +84,153 @@ class AdminPlatformHealthScreen extends StatelessWidget {
         status: _statusLabel(resolvedPct),
       ),
     ];
+  }
 
-    // Overall health = average of all percentages
-    final overallPct = metrics.fold(0, (s, m) => s + m.percent) ~/ metrics.length;
+  static String _statusLabel(int pct) {
+    if (pct >= 90) return 'Excellent';
+    if (pct >= 70) return 'Good';
+    if (pct >= 50) return 'Fair';
+    return 'Needs attention';
+  }
+
+  Future<void> _exportPdf() async {
+    setState(() => _exporting = true);
+    try {
+      final metrics = _buildMetrics();
+      final overallPct =
+          metrics.fold(0, (s, m) => s + m.percent) ~/ metrics.length;
+      final now = DateTime.now();
+      final dateStr =
+          '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+      final pdf = pw.Document();
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(36),
+          header: (_) => pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text(
+                    'Platform Health Report',
+                    style: pw.TextStyle(
+                        fontSize: 18, fontWeight: pw.FontWeight.bold),
+                  ),
+                  pw.Text(
+                    'Generated: $dateStr',
+                    style: const pw.TextStyle(
+                        fontSize: 9, color: PdfColors.grey700),
+                  ),
+                ],
+              ),
+              pw.Divider(color: PdfColors.indigo700),
+              pw.SizedBox(height: 6),
+            ],
+          ),
+          build: (_) => [
+            pw.Container(
+              padding: const pw.EdgeInsets.all(14),
+              decoration: pw.BoxDecoration(
+                color: PdfColors.indigo50,
+                borderRadius: pw.BorderRadius.circular(6),
+              ),
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('Overall Health Score',
+                          style: const pw.TextStyle(
+                              fontSize: 9, color: PdfColors.grey700)),
+                      pw.SizedBox(height: 4),
+                      pw.Text('$overallPct%',
+                          style: pw.TextStyle(
+                              fontSize: 22, fontWeight: pw.FontWeight.bold)),
+                    ],
+                  ),
+                  pw.Text(_statusLabel(overallPct),
+                      style: pw.TextStyle(
+                          fontSize: 11,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColors.indigo700)),
+                ],
+              ),
+            ),
+            pw.SizedBox(height: 20),
+            pw.Text('Metrics',
+                style: pw.TextStyle(
+                    fontSize: 13, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 8),
+            pw.Table(
+              border: pw.TableBorder.all(
+                  color: PdfColors.grey300, width: 0.5),
+              columnWidths: {
+                0: const pw.FlexColumnWidth(2.4),
+                1: const pw.FlexColumnWidth(1),
+                2: const pw.FlexColumnWidth(1.6),
+                3: const pw.FlexColumnWidth(3),
+              },
+              children: [
+                pw.TableRow(
+                  decoration:
+                      const pw.BoxDecoration(color: PdfColors.indigo700),
+                  children: ['Metric', 'Value', 'Status', 'Detail']
+                      .map((c) => pw.Padding(
+                            padding: const pw.EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 6),
+                            child: pw.Text(c,
+                                style: pw.TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: pw.FontWeight.bold,
+                                    color: PdfColors.white)),
+                          ))
+                      .toList(),
+                ),
+                ...metrics.map((m) => pw.TableRow(
+                      children: [
+                        m.label,
+                        m.displayValue,
+                        m.status,
+                        m.detail,
+                      ]
+                          .map((c) => pw.Padding(
+                                padding: const pw.EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 5),
+                                child: pw.Text(c,
+                                    style: const pw.TextStyle(fontSize: 9)),
+                              ))
+                          .toList(),
+                    )),
+              ],
+            ),
+          ],
+        ),
+      );
+
+      await Printing.sharePdf(
+        bytes: await pdf.save(),
+        filename: 'platform_health_$dateStr.pdf',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('PDF export failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final metrics = _buildMetrics();
+    final overallPct =
+        metrics.fold(0, (s, m) => s + m.percent) ~/ metrics.length;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -94,6 +251,47 @@ class AdminPlatformHealthScreen extends StatelessWidget {
             letterSpacing: -0.3,
           ),
         ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: GestureDetector(
+              onTap: _exporting ? null : _exportPdf,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF6C63FF).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: const Color(0xFF6C63FF).withOpacity(0.4)),
+                ),
+                child: _exporting
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Color(0xFF6C63FF)),
+                      )
+                    : const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.picture_as_pdf_rounded,
+                              size: 14, color: Color(0xFF6C63FF)),
+                          SizedBox(width: 4),
+                          Text(
+                            'Export PDF',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF6C63FF),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+            ),
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Container(height: 1, color: AppColors.border),
@@ -143,13 +341,6 @@ class AdminPlatformHealthScreen extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  static String _statusLabel(int pct) {
-    if (pct >= 90) return 'Excellent';
-    if (pct >= 70) return 'Good';
-    if (pct >= 50) return 'Fair';
-    return 'Needs attention';
   }
 }
 

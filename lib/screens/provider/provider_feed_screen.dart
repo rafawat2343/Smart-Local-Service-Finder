@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../../services/connectivity_service.dart';
@@ -128,21 +129,54 @@ class _FeedHomeState extends State<_FeedHome> {
   String _providerInitials = 'P';
   String _providerLocation = '';
   String _providerSpecialty = '';
+  double? _providerLat;
+  double? _providerLng;
+  int _providerHourlyRate = 0;
   int _todayJobs = 0;
   int _monthJobs = 0;
   String _earnings = '৳0';
   int _selectedFilter = 0;
 
+  static double _haversineKm(
+      double lat1, double lon1, double lat2, double lon2) {
+    const r = 6371.0;
+    final dLat = (lat2 - lat1) * math.pi / 180;
+    final dLon = (lon2 - lon1) * math.pi / 180;
+    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1 * math.pi / 180) *
+            math.cos(lat2 * math.pi / 180) *
+            math.sin(dLon / 2) *
+            math.sin(dLon / 2);
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  }
+
   List<Map<String, dynamic>> get _filteredJobs {
     if (_selectedFilter == 0) return _jobs; // All Jobs
     if (_selectedFilter == 1) {
-      // Nearby
+      // Nearby — GPS 2 km radius when coords available, else string match
+      final pLat = _providerLat;
+      final pLng = _providerLng;
+      if (pLat != null && pLng != null) {
+        return _jobs.where((j) {
+          final jLat = j['latitude'];
+          final jLng = j['longitude'];
+          if (jLat is num && jLng is num) {
+            return _haversineKm(pLat, pLng, jLat.toDouble(), jLng.toDouble()) <=
+                2.0;
+          }
+          // Fall back to string match for older requests without coords
+          final jobLoc = (j['location'] ?? '').toString().toLowerCase();
+          final provLoc = _providerLocation.toLowerCase();
+          return provLoc.isNotEmpty &&
+              (jobLoc.contains(provLoc) || provLoc.contains(jobLoc));
+        }).toList();
+      }
+      // No provider coords — string match
       if (_providerLocation.trim().isEmpty) return _jobs;
       return _jobs.where((j) {
-        final jobLocation = (j['location'] ?? '').toString().toLowerCase();
-        final providerLocation = _providerLocation.toLowerCase();
-        return jobLocation.contains(providerLocation) ||
-            providerLocation.contains(jobLocation);
+        final jobLoc = (j['location'] ?? '').toString().toLowerCase();
+        final provLoc = _providerLocation.toLowerCase();
+        return jobLoc.contains(provLoc) || provLoc.contains(jobLoc);
       }).toList();
     }
     if (_selectedFilter == 2) {
@@ -150,13 +184,16 @@ class _FeedHomeState extends State<_FeedHome> {
       return _jobs.where((j) => j['isUrgent'] == true).toList();
     }
     if (_selectedFilter == 3) {
-      // High Pay — sort by budget descending
+      // High Pay — budget > provider's hourly rate
+      if (_providerHourlyRate > 0) {
+        return _jobs
+            .where((j) => _parseBudget(j['budget']) > _providerHourlyRate)
+            .toList();
+      }
+      // If provider rate unknown, sort by budget descending
       final sorted = List<Map<String, dynamic>>.from(_jobs);
-      sorted.sort((a, b) {
-        final aB = _parseBudget(a['budget']);
-        final bB = _parseBudget(b['budget']);
-        return bB.compareTo(aB);
-      });
+      sorted.sort((a, b) =>
+          _parseBudget(b['budget']).compareTo(_parseBudget(a['budget'])));
       return sorted;
     }
     return _jobs;
@@ -780,6 +817,11 @@ class _FeedHomeState extends State<_FeedHome> {
                                     final requestId = job['id'] ?? '';
                                     final clientId = job['clientId'] ?? '';
                                     final budget = job['budget'] ?? '';
+                                    final jobSpecialty = (job['category'] ??
+                                            job['categoryKey'] ??
+                                            job['serviceType'] ??
+                                            '')
+                                        .toString();
 
                                     final hasNet =
                                         await ConnectivityService.hasInternet();
@@ -805,6 +847,7 @@ class _FeedHomeState extends State<_FeedHome> {
                                         providerId: providerId,
                                         agreedPrice: budget,
                                         status: 'confirmed',
+                                        specialty: jobSpecialty,
                                       );
                                       String providerName = _providerName;
                                       if (providerName.isEmpty) {

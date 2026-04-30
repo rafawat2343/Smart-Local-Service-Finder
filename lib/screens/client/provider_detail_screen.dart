@@ -7,7 +7,7 @@ import '../../widgets/shared_widgets.dart';
 import '../shared/chat_screen.dart';
 import 'report_provider_screen.dart';
 
-class ProviderDetailScreen extends StatelessWidget {
+class ProviderDetailScreen extends StatefulWidget {
   final String providerId;
   final String name;
   final String initials;
@@ -35,33 +35,69 @@ class ProviderDetailScreen extends StatelessWidget {
     required this.jobs,
   });
 
+  @override
+  State<ProviderDetailScreen> createState() => _ProviderDetailScreenState();
+}
+
+class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
+  bool _isBookmarked = false;
+  String _clientId = '';
+  late Future<Map<String, dynamic>> _detailFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _clientId = AuthService.getCurrentUserId() ?? '';
+    _detailFuture = _loadProviderDetail();
+    _loadBookmarkState();
+  }
+
+  Future<void> _loadBookmarkState() async {
+    if (_clientId.isEmpty || widget.providerId.isEmpty) return;
+    final bookmarked = await DatabaseService.isBookmarked(
+      _clientId,
+      widget.providerId,
+    );
+    if (mounted) setState(() => _isBookmarked = bookmarked);
+  }
+
+  Future<void> _toggleBookmark() async {
+    if (_clientId.isEmpty || widget.providerId.isEmpty) return;
+    setState(() => _isBookmarked = !_isBookmarked);
+    try {
+      await DatabaseService.toggleBookmark(_clientId, widget.providerId);
+    } catch (_) {
+      if (mounted) setState(() => _isBookmarked = !_isBookmarked);
+    }
+  }
+
   Future<Map<String, dynamic>> _loadProviderDetail() async {
     final baseProfile = {
-      'id': providerId,
-      'displayName': name,
-      'name': name,
-      'initials': initials,
-      'specialty': specialty,
-      'serviceType': specialty,
-      'exp': exp,
-      'experience': exp,
-      'rating': rating,
-      'ratingAvg': rating,
-      'reviews': reviews,
-      'totalReviews': reviews,
-      'distance': distance,
-      'available': available,
-      'isAvailable': available,
-      'price': price,
-      'hourlyRate': price,
-      'jobs': jobs,
-      'jobsCompleted': jobs,
+      'id': widget.providerId,
+      'displayName': widget.name,
+      'name': widget.name,
+      'initials': widget.initials,
+      'specialty': widget.specialty,
+      'serviceType': widget.specialty,
+      'exp': widget.exp,
+      'experience': widget.exp,
+      'rating': widget.rating,
+      'ratingAvg': widget.rating,
+      'reviews': widget.reviews,
+      'totalReviews': widget.reviews,
+      'distance': widget.distance,
+      'available': widget.available,
+      'isAvailable': widget.available,
+      'price': widget.price,
+      'hourlyRate': widget.price,
+      'jobs': widget.jobs,
+      'jobsCompleted': widget.jobs,
       'about': '',
       'services': const <String>[],
       'availabilityText': '',
     };
 
-    if (providerId.isEmpty) {
+    if (widget.providerId.isEmpty) {
       return {'profile': baseProfile, 'reviews': <Map<String, dynamic>>[]};
     }
 
@@ -70,24 +106,29 @@ class ProviderDetailScreen extends StatelessWidget {
     List<Map<String, dynamic>> providerReviews = const [];
 
     try {
-      providerData = await DatabaseService.getProviderProfile(providerId);
+      providerData =
+          await DatabaseService.getProviderProfile(widget.providerId);
     } catch (_) {}
     try {
-      userData = await DatabaseService.getUserData(providerId);
+      userData = await DatabaseService.getUserData(widget.providerId);
     } catch (_) {}
     try {
-      providerReviews = await DatabaseService.getProviderReviews(providerId);
+      providerReviews =
+          await DatabaseService.getProviderReviews(widget.providerId);
     } catch (_) {}
 
     final merged = {...baseProfile, ...?userData, ...?providerData};
 
-    final liveName = (merged['displayName'] ?? merged['name'] ?? name)
-        .toString();
+    final liveName =
+        (merged['displayName'] ?? merged['name'] ?? widget.name).toString();
     final liveSpecialty =
-        (merged['serviceType'] ?? merged['specialty'] ?? specialty).toString();
-    final liveExp = (merged['experience'] ?? merged['exp'] ?? exp).toString();
-    final liveInitials = (merged['initials'] ?? initials).toString();
-    final liveAbout = (merged['about'] ?? merged['aboutText'] ?? '').toString();
+        (merged['serviceType'] ?? merged['specialty'] ?? widget.specialty)
+            .toString();
+    final liveExp =
+        (merged['experience'] ?? merged['exp'] ?? widget.exp).toString();
+    final liveInitials = (merged['initials'] ?? widget.initials).toString();
+    final liveAbout =
+        (merged['about'] ?? merged['aboutText'] ?? '').toString();
     final liveAvailabilityText =
         (merged['availabilityText'] ?? merged['availableText'] ?? '')
             .toString();
@@ -96,27 +137,28 @@ class ProviderDetailScreen extends StatelessWidget {
     );
     final liveRating = _toDouble(
       merged['ratingAvg'] ?? merged['rating'],
-      fallback: rating,
+      fallback: widget.rating,
     );
     final liveReviewCount = providerReviews.isNotEmpty
         ? providerReviews.length
         : _toInt(
             merged['totalReviews'] ?? merged['reviews'],
-            fallback: reviews,
+            fallback: widget.reviews,
           );
-    final livePriceValue = (merged['hourlyRate'] ?? merged['price'] ?? price)
-        .toString();
+    final livePriceValue =
+        (merged['hourlyRate'] ?? merged['price'] ?? widget.price).toString();
     final liveAvailable =
-        (merged['isAvailable'] ?? merged['available'] ?? available) == true;
+        (merged['isAvailable'] ?? merged['available'] ?? widget.available) ==
+        true;
     final liveJobs = _toInt(
       merged['jobsCompleted'] ?? merged['jobs'],
-      fallback: jobs,
+      fallback: widget.jobs,
     );
 
     return {
       'profile': {
         ...merged,
-        'id': providerId,
+        'id': widget.providerId,
         'displayName': liveName,
         'name': liveName,
         'initials': liveInitials,
@@ -182,7 +224,7 @@ class ProviderDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<Map<String, dynamic>>(
-      future: _loadProviderDetail(),
+      future: _detailFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
@@ -204,37 +246,41 @@ class ProviderDetailScreen extends StatelessWidget {
           ),
         );
 
-        final providerId = (profile['id'] ?? this.providerId).toString();
-        final name = (profile['displayName'] ?? profile['name'] ?? this.name)
-            .toString();
-        final initials = (profile['initials'] ?? this.initials).toString();
-        final specialty =
-            (profile['specialty'] ?? profile['serviceType'] ?? this.specialty)
+        final providerId =
+            (profile['id'] ?? widget.providerId).toString();
+        final name =
+            (profile['displayName'] ?? profile['name'] ?? widget.name)
                 .toString();
-        final exp = (profile['exp'] ?? profile['experience'] ?? this.exp)
-            .toString();
+        final initials =
+            (profile['initials'] ?? widget.initials).toString();
+        final specialty =
+            (profile['specialty'] ?? profile['serviceType'] ?? widget.specialty)
+                .toString();
+        final exp =
+            (profile['exp'] ?? profile['experience'] ?? widget.exp).toString();
         final rating = _toDouble(
           profile['ratingAvg'] ?? profile['rating'],
-          fallback: this.rating,
+          fallback: widget.rating,
         );
         final reviews = _toInt(
           profile['totalReviews'] ?? profile['reviews'],
-          fallback: this.reviews,
+          fallback: widget.reviews,
         );
         final distance = _toDouble(
           profile['distance'],
-          fallback: this.distance,
+          fallback: widget.distance,
         );
         final available =
             (profile['isAvailable'] ??
                 profile['available'] ??
-                this.available) ==
+                widget.available) ==
             true;
-        final price = (profile['hourlyRate'] ?? profile['price'] ?? this.price)
-            .toString();
+        final price =
+            (profile['hourlyRate'] ?? profile['price'] ?? widget.price)
+                .toString();
         final jobs = _toInt(
           profile['jobsCompleted'] ?? profile['jobs'],
-          fallback: this.jobs,
+          fallback: widget.jobs,
         );
         final aboutText = (profile['about'] ?? profile['aboutText'] ?? '')
             .toString()
@@ -279,33 +325,6 @@ class ProviderDetailScreen extends StatelessWidget {
                           ),
                         ),
                         actions: [
-                          // Share
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(0, 8, 4, 8),
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.12),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: IconButton(
-                                icon: const Icon(
-                                  Icons.share_outlined,
-                                  size: 17,
-                                  color: Colors.white,
-                                ),
-                                onPressed: () =>
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Share pressed'),
-                                      ),
-                                    ),
-                                padding: EdgeInsets.zero,
-                                tooltip: 'Share',
-                              ),
-                            ),
-                          ),
                           // Report
                           Padding(
                             padding: const EdgeInsets.fromLTRB(0, 8, 4, 8),
@@ -343,23 +362,37 @@ class ProviderDetailScreen extends StatelessWidget {
                               width: 36,
                               height: 36,
                               decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.12),
+                                color: _isBookmarked
+                                    ? Colors.white.withOpacity(0.22)
+                                    : Colors.white.withOpacity(0.12),
                                 borderRadius: BorderRadius.circular(8),
                               ),
                               child: IconButton(
-                                icon: const Icon(
-                                  Icons.bookmark_outline_rounded,
+                                icon: Icon(
+                                  _isBookmarked
+                                      ? Icons.bookmark_rounded
+                                      : Icons.bookmark_outline_rounded,
                                   size: 17,
                                   color: Colors.white,
                                 ),
-                                onPressed: () =>
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Saved to bookmarks'),
+                                onPressed: () async {
+                                  await _toggleBookmark();
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(
+                                      context,
+                                    ).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          _isBookmarked
+                                              ? 'Saved to bookmarks'
+                                              : 'Removed from bookmarks',
+                                        ),
                                       ),
-                                    ),
+                                    );
+                                  }
+                                },
                                 padding: EdgeInsets.zero,
-                                tooltip: 'Save',
+                                tooltip: _isBookmarked ? 'Unsave' : 'Save',
                               ),
                             ),
                           ),
@@ -889,6 +922,7 @@ class ProviderDetailScreen extends StatelessWidget {
                                     providerName: name,
                                     providerId: providerId,
                                     defaultPrice: price,
+                                    specialty: specialty,
                                   )
                               : null,
                           child: Container(
@@ -940,6 +974,7 @@ class ProviderDetailScreen extends StatelessWidget {
     required String providerName,
     required String providerId,
     required String defaultPrice,
+    String specialty = '',
   }) {
     final priceController = TextEditingController(
       text: defaultPrice.replaceAll(RegExp(r'[^0-9.]'), ''),
@@ -1144,6 +1179,7 @@ class ProviderDetailScreen extends StatelessWidget {
                                     providerId: providerId,
                                     agreedPrice: '\$$rate',
                                     description: desc,
+                                    specialty: specialty,
                                   );
                                   if (ctx.mounted) Navigator.pop(ctx);
                                   if (context.mounted) {

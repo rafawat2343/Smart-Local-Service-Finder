@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
+import '../../services/database_service.dart';
 import '../../services/remember_me_service.dart';
 import '../../utils/app_colors.dart';
 import '../../widgets/shared_widgets.dart';
@@ -89,6 +90,36 @@ class _LoginScreenState extends State<LoginScreen> {
       if (user == null) {
         throw Exception('Login failed. Please try again.');
       }
+
+      // Gate: block suspended accounts and providers awaiting approval.
+      // Wrong-role logins (client signing in through the provider tab or
+      // vice-versa) are bounced here too, with a clear message.
+      final gate = await DatabaseService.getLoginGateInfo(user.uid);
+      if (gate != null) {
+        final type = (gate['userType'] as String? ?? '');
+        final isActive = gate['isActive'] as bool? ?? true;
+        final isApproved = gate['isApproved'] as bool? ?? true;
+        String? blockMessage;
+        if (type.isNotEmpty &&
+            type != (widget.isClient ? 'client' : 'provider')) {
+          blockMessage =
+              'This account is registered as a $type. Please use the $type sign-in screen.';
+        } else if (!isActive) {
+          blockMessage =
+              'Your account has been suspended by the administrator. Please contact support for assistance.';
+        } else if (type == 'provider' && !isApproved) {
+          blockMessage =
+              'Your provider account is awaiting administrator approval. You\'ll be able to sign in once an admin approves your listing.';
+        }
+        if (blockMessage != null) {
+          await AuthService.signOut();
+          throw Exception(blockMessage);
+        }
+      }
+
+      // Successful sign-in: clear any prior admin deactivation so the user
+      // becomes visible to the opposite role again, per product spec.
+      await DatabaseService.activateUserOnLogin(user.uid);
 
       await RememberMeService.save(
         rememberMe: _rememberMe,

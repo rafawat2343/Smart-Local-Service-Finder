@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../services/auth_service.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/database_service.dart';
@@ -263,12 +265,62 @@ class _DashboardHomeState extends State<_DashboardHome> {
     }
   }
 
+  Future<void> _detectLocation(
+    TextEditingController ctrl,
+    void Function(void Function()) setSt,
+    void Function(double lat, double lng) onDetected,
+  ) async {
+    try {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.denied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Location permission denied')),
+          );
+        }
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      String address =
+          '${pos.latitude.toStringAsFixed(4)}, ${pos.longitude.toStringAsFixed(4)}';
+      try {
+        final marks =
+            await placemarkFromCoordinates(pos.latitude, pos.longitude);
+        if (marks.isNotEmpty) {
+          final p = marks.first;
+          final parts = [p.subLocality, p.locality, p.administrativeArea]
+              .where((s) => s != null && s.isNotEmpty)
+              .map((s) => s!)
+              .toList();
+          if (parts.isNotEmpty) address = parts.join(', ');
+        }
+      } catch (_) {}
+      ctrl.text = address;
+      onDetected(pos.latitude, pos.longitude);
+      setSt(() {});
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not detect location: $e')),
+        );
+      }
+    }
+  }
+
   void _showCreateRequestSheet() {
     final descCtrl = TextEditingController();
     final locationCtrl = TextEditingController();
     final budgetCtrl = TextEditingController();
     String selectedCategory = 'Electrician';
     bool isUrgent = false;
+    double? detectedLat;
+    double? detectedLng;
 
     showModalBottomSheet(
       context: context,
@@ -423,6 +475,22 @@ class _DashboardHomeState extends State<_DashboardHome> {
                         ),
                       ),
                       prefixIconConstraints: const BoxConstraints(),
+                      suffixIcon: IconButton(
+                        icon: const Icon(
+                          Icons.my_location_rounded,
+                          size: 18,
+                          color: AppColors.navy,
+                        ),
+                        tooltip: 'Use current location',
+                        onPressed: () => _detectLocation(
+                          locationCtrl,
+                          setSheetState,
+                          (lat, lng) {
+                            detectedLat = lat;
+                            detectedLng = lng;
+                          },
+                        ),
+                      ),
                       filled: true,
                       fillColor: AppColors.surfaceAlt,
                       border: OutlineInputBorder(
@@ -566,6 +634,8 @@ class _DashboardHomeState extends State<_DashboardHome> {
                           location: locationCtrl.text.trim(),
                           budget: budgetCtrl.text.trim(),
                           isUrgent: isUrgent,
+                          latitude: detectedLat,
+                          longitude: detectedLng,
                         );
                         if (ctx.mounted) {
                           Navigator.pop(ctx);

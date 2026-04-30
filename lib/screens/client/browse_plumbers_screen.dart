@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../services/database_service.dart';
 import '../../utils/app_colors.dart';
+import '../../utils/geo_utils.dart';
 import '../../widgets/shared_widgets.dart';
 import 'provider_detail_screen.dart';
 
@@ -20,18 +22,50 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
   bool _loading = true;
   late TextEditingController _searchController;
   String _searchQuery = '';
+  double? _clientLat;
+  double? _clientLng;
+  bool _hasClientLocation = false;
+  bool _locationChecked = false;
 
   @override
   void initState() {
     super.initState();
     _searchController = TextEditingController();
-    _loadProviders();
+    _loadAll();
   }
 
   @override
   void dispose() {
     _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadAll() async {
+    await _fetchClientLocation();
+    await _loadProviders();
+  }
+
+  Future<void> _fetchClientLocation() async {
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.whileInUse ||
+          perm == LocationPermission.always) {
+        final pos = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.medium,
+        );
+        _clientLat = pos.latitude;
+        _clientLng = pos.longitude;
+        _hasClientLocation = true;
+      } else {
+        _hasClientLocation = false;
+      }
+    } catch (_) {
+      _hasClientLocation = false;
+    }
+    _locationChecked = true;
   }
 
   Future<void> _loadProviders() async {
@@ -59,7 +93,18 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                   ? (p['ratingAvg'] as int).toDouble()
                   : (p['ratingAvg'] ?? 0.0),
               'reviews': p['totalReviews'] ?? 0,
-              'distance': 0.0,
+              'distance': (_clientLat != null &&
+                      _clientLng != null &&
+                      p['latitude'] != null &&
+                      p['longitude'] != null)
+                  ? GeoUtils.haversineKm(
+                      _clientLat!,
+                      _clientLng!,
+                      (p['latitude'] as num).toDouble(),
+                      (p['longitude'] as num).toDouble(),
+                    )
+                  : null,
+              'serviceRadiusKm': (p['serviceRadiusKm'] as int?) ?? 5,
               'available': p['isAvailable'] ?? true,
               'price': p['hourlyRate'] ?? '500',
               'jobs': p['totalJobs'] ?? 0,
@@ -102,9 +147,17 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
         ),
       );
     } else if (_selectedFilter == 2) {
+      if (_hasClientLocation) {
+        list = list.where((p) {
+          final dist = p['distance'] as double?;
+          if (dist == null) return false;
+          final radius = (p['serviceRadiusKm'] as int?) ?? 5;
+          return dist <= radius;
+        }).toList();
+      }
       list.sort(
-        (a, b) => ((a['distance'] ?? 0.0) as double).compareTo(
-          (b['distance'] ?? 0.0) as double,
+        (a, b) => ((a['distance'] as double?) ?? double.infinity).compareTo(
+          (b['distance'] as double?) ?? double.infinity,
         ),
       );
     } else if (_selectedFilter == 3) {
@@ -121,7 +174,11 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
         .where((p) => int.parse('${p['price'] ?? '0'}') <= _maxPrice)
         .toList();
     list = list
-        .where((p) => ((p['distance'] ?? 0.0) as double) <= _maxDistance)
+        .where((p) {
+          final dist = p['distance'] as double?;
+          if (dist == null) return true;
+          return dist <= _maxDistance;
+        })
         .toList();
 
     if (_sortBy == 'Rating') {
@@ -132,8 +189,8 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
       );
     } else if (_sortBy == 'Distance') {
       list.sort(
-        (a, b) => ((a['distance'] ?? 0.0) as double).compareTo(
-          (b['distance'] ?? 0.0) as double,
+        (a, b) => ((a['distance'] as double?) ?? double.infinity).compareTo(
+          (b['distance'] as double?) ?? double.infinity,
         ),
       );
     } else if (_sortBy == 'Price') {
@@ -470,7 +527,11 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                       itemBuilder: (context, i) {
                         final selected = i == _selectedFilter;
                         return GestureDetector(
-                          onTap: () => setState(() => _selectedFilter = i),
+                          onTap: (i == 2 &&
+                                  _locationChecked &&
+                                  !_hasClientLocation)
+                              ? null
+                              : () => setState(() => _selectedFilter = i),
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
                             padding: const EdgeInsets.symmetric(
@@ -478,7 +539,11 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                               vertical: 6,
                             ),
                             decoration: BoxDecoration(
-                              color: selected
+                              color: (i == 2 &&
+                                      _locationChecked &&
+                                      !_hasClientLocation)
+                                  ? Colors.white.withOpacity(0.05)
+                                  : selected
                                   ? Colors.white.withOpacity(0.3)
                                   : Colors.white.withOpacity(0.1),
                               borderRadius: BorderRadius.circular(4),
@@ -493,7 +558,11 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                               style: TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
-                                color: selected
+                                color: (i == 2 &&
+                                        _locationChecked &&
+                                        !_hasClientLocation)
+                                    ? Colors.white.withOpacity(0.3)
+                                    : selected
                                     ? Colors.white
                                     : Colors.white.withOpacity(0.8),
                                 letterSpacing: 0.1,
@@ -507,6 +576,31 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                 ],
               ),
             ),
+
+            if (_locationChecked && !_hasClientLocation)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                color: Colors.amber.shade50,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.location_off_outlined,
+                      color: Colors.amber.shade700,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Enable location for nearby results',
+                        style: TextStyle(fontSize: 12, color: Colors.black87),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
 
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
@@ -582,7 +676,7 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                       ),
                     )
                   : RefreshIndicator(
-                      onRefresh: _loadProviders,
+                      onRefresh: _loadAll,
                       child: ListView.separated(
                         padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
                         itemCount: providers.length,
@@ -715,7 +809,12 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                                                         AppColors.textTertiary,
                                                   ),
                                                   Text(
-                                                    '${p['distance'] ?? 0} km',
+                                                    p['distance'] != null
+                                                        ? GeoUtils.formatDistance(
+                                                            p['distance']
+                                                                as double,
+                                                          )
+                                                        : 'Dist. unknown',
                                                     style: const TextStyle(
                                                       fontSize: 11,
                                                       color: AppColors

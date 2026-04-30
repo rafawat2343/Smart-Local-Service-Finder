@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/auth_service.dart';
 import '../../services/connectivity_service.dart';
@@ -9,6 +11,7 @@ import '../../utils/theme_notifier.dart';
 import '../../widgets/shared_widgets.dart';
 import '../shared/user_type_screen.dart';
 import 'client_notifications_screen.dart';
+import 'saved_providers_screen.dart';
 
 class ClientProfileScreen extends StatefulWidget {
   const ClientProfileScreen({super.key});
@@ -25,6 +28,9 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
   Map<String, dynamic>? _profileData;
   String _themeMode = 'System'; // 'Light', 'Dark', 'System'
   bool _isLoading = true;
+  int _liveRequests = 0;
+  int _liveCompleted = 0;
+  int _liveReviews = 0;
 
   @override
   void initState() {
@@ -49,14 +55,74 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
         ...?clientData,
         'email': clientData?['email'] ?? userData?['email'] ?? authEmail,
       };
+
+      final liveStats = await DatabaseService.getClientLiveStats(userId);
+
       if (mounted) {
         setState(() {
           _profileData = data;
+          _liveRequests = liveStats['totalRequests'] ?? 0;
+          _liveCompleted = liveStats['completedBookings'] ?? 0;
+          _liveReviews = liveStats['reviewsGiven'] ?? 0;
         });
       }
     } catch (_) {
     } finally {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _detectAndFillLocation(TextEditingController ctrl,
+      void Function(void Function()) setSt) async {
+    setSt(() {});
+    try {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.denied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Location permission denied')),
+          );
+        }
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      String address = '${pos.latitude.toStringAsFixed(4)}, '
+          '${pos.longitude.toStringAsFixed(4)}';
+      try {
+        final placemarks =
+            await placemarkFromCoordinates(pos.latitude, pos.longitude);
+        if (placemarks.isNotEmpty) {
+          final p = placemarks.first;
+          final parts = [p.subLocality, p.locality, p.administrativeArea]
+              .where((s) => s != null && s!.isNotEmpty)
+              .map((s) => s!)
+              .toList();
+          if (parts.isNotEmpty) address = parts.join(', ');
+        }
+      } catch (_) {}
+      ctrl.text = address;
+      // Store lat/lng to Firestore
+      final userId = AuthService.getCurrentUserId();
+      if (userId != null) {
+        await DatabaseService.updateUserLocation(
+          userId: userId,
+          latitude: pos.latitude,
+          longitude: pos.longitude,
+          isClient: true,
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not detect location: $e')),
+        );
+      }
     }
   }
 
@@ -76,9 +142,9 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
       _profileData?['location'] ?? _profileData?['address'] ?? '';
   String get _email =>
       _profileData?['email'] ?? AuthService.getCurrentUserEmail() ?? '';
-  int get _totalRequests => _profileData?['totalRequests'] ?? 0;
-  int get _completedRequests => _profileData?['completedRequests'] ?? 0;
-  int get _reviewsGiven => _profileData?['reviewsGiven'] ?? 0;
+  int get _totalRequests => _liveRequests;
+  int get _completedRequests => _liveCompleted;
+  int get _reviewsGiven => _liveReviews;
 
   void _showEditProfileSheet() {
     final locationCtrl = TextEditingController(text: _location);
@@ -88,7 +154,8 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => Padding(
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSt) => Padding(
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(context).viewInsets.bottom,
         ),
@@ -156,6 +223,16 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                       ),
                     ),
                     prefixIconConstraints: const BoxConstraints(),
+                    suffixIcon: IconButton(
+                      icon: const Icon(
+                        Icons.my_location_rounded,
+                        size: 18,
+                        color: AppColors.navy,
+                      ),
+                      tooltip: 'Use current location',
+                      onPressed: () =>
+                          _detectAndFillLocation(locationCtrl, setSt),
+                    ),
                     filled: true,
                     fillColor: AppColors.surfaceAlt,
                     border: OutlineInputBorder(
@@ -294,6 +371,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
           ),
         ),
       ),
+      ),  // StatefulBuilder
     );
   }
 
@@ -475,6 +553,92 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmDeleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded,
+                size: 22, color: Color(0xFFD94040)),
+            SizedBox(width: 10),
+            Text(
+              'Delete Account',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          'This will permanently delete your account and erase all of your '
+          'requests, bookings, conversations, reviews and reports.\n\n'
+          'This action cannot be undone.',
+          style: TextStyle(
+            fontSize: 14,
+            color: AppColors.textSecondary,
+            height: 1.5,
+          ),
+        ),
+        actionsPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFD94040),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete Account'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final hasNet = await ConnectivityService.hasInternet();
+    if (!hasNet) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No internet connection')),
+      );
+      return;
+    }
+
+    final userId = AuthService.getCurrentUserId();
+    if (userId == null) return;
+
+    try {
+      await DatabaseService.deleteOwnAccountData(
+        userId: userId,
+        userType: 'client',
+      );
+      await AuthService.signOut();
+      if (!mounted) return;
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const UserTypeScreen()),
+        (r) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Could not delete account: ${e.toString().replaceAll('Exception: ', '')}',
+          ),
+        ),
+      );
+    }
   }
 
   void _confirmLogout() {
@@ -798,6 +962,18 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                         child: Column(
                           children: [
                             _SettingRow(
+                              icon: Icons.bookmark_outline_rounded,
+                              label: 'Bookmarked Providers',
+                              showDivider: true,
+                              onTap: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      const SavedProvidersScreen(),
+                                ),
+                              ),
+                            ),
+                            _SettingRow(
                               icon: Icons.notifications_outlined,
                               label: 'Notifications',
                               showDivider: true,
@@ -865,6 +1041,36 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                         outlined: true,
                         color: AppColors.urgent,
                         onTap: _confirmLogout,
+                      ),
+                      const SizedBox(height: 12),
+
+                      // ── Delete Account (irreversible) ──────────────────
+                      GestureDetector(
+                        onTap: _confirmDeleteAccount,
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFD94040),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.delete_forever_rounded,
+                                  size: 18, color: Colors.white),
+                              SizedBox(width: 8),
+                              Text(
+                                'Delete Account',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                       const SizedBox(height: 24),
                     ],
