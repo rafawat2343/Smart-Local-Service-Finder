@@ -3,6 +3,7 @@ import 'package:camera/camera.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/auth_service.dart';
 import '../../services/database_service.dart';
+import 'nid_ocr_service.dart';
 import '../../utils/app_colors.dart';
 import '../../widgets/shared_widgets.dart';
 import '../client/client_dashboard.dart';
@@ -15,7 +16,6 @@ class NidData {
   final String dateOfBirth;
   final String fatherName;
   final String motherName;
-  final String address;
   final String phoneNumber;
   final String email;
   final String password;
@@ -29,7 +29,6 @@ class NidData {
     this.dateOfBirth = '',
     this.fatherName = '',
     this.motherName = '',
-    this.address = '',
     this.phoneNumber = '',
     this.email = '',
     this.password = '',
@@ -343,46 +342,48 @@ class _StepNidScan extends StatefulWidget {
 class _StepNidScanState extends State<_StepNidScan> {
   String _state = 'idle'; // idle | camera | scanning | done
   final ImagePicker _picker = ImagePicker();
+  NidData _extracted = const NidData();
 
   Future<void> _pickFromGallery() async {
     try {
       final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
-      if (image != null) {
-        await _runOcr();
-      }
+      if (image != null) await _runOcr(image.path);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error picking image: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error picking image: $e')));
       }
     }
   }
 
-  Future<void> _runOcr() async {
+  Future<void> _runOcr(String imagePath) async {
     setState(() => _state = 'scanning');
-    await Future.delayed(const Duration(milliseconds: 2400));
-    if (mounted) setState(() => _state = 'done');
+    try {
+      final data = await NidOcrService.extractFromImage(imagePath);
+      if (!mounted) return;
+      setState(() {
+        _extracted = data;
+        _state = 'done';
+      });
+    } on NidOcrException catch (e) {
+      if (!mounted) return;
+      setState(() => _state = 'idle');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message), duration: const Duration(seconds: 4)),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _state = 'idle');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Could not scan NID: $e')));
+    }
   }
-
-  void _onImageCaptured(XFile image) {
-    _runOcr();
-  }
-
-  static const _mock = NidData(
-    fullName: 'Md. Rafawat Islam',
-    nidNumber: '1234567890123',
-    dateOfBirth: '11 Nov 2001',
-    fatherName: 'Md. Rafiqul Islam Talukder',
-    motherName: 'Husna Ara',
-    address: 'Mirpur-2, Dhaka',
-  );
 
   @override
   Widget build(BuildContext context) {
     if (_state == 'camera') {
       return _CameraViewfinder(
-        onCapture: _onImageCaptured,
+        onCapture: (img) => _runOcr(img.path),
         onCancel: () => setState(() => _state = 'idle'),
       );
     }
@@ -398,11 +399,10 @@ class _StepNidScanState extends State<_StepNidScan> {
             color: AppColors.navy,
             bg: AppColors.navyLight,
             text:
-                'Scan or upload your National ID Card. OCR will auto-fill your details — you can review and edit before continuing.',
+                'Scan or upload your National ID Card. OCR will auto-fill your Name, NID Number and Date of Birth.',
           ),
           const SizedBox(height: 20),
 
-          // Status box
           AnimatedContainer(
             duration: const Duration(milliseconds: 280),
             width: double.infinity,
@@ -420,7 +420,7 @@ class _StepNidScanState extends State<_StepNidScan> {
               ),
             ),
             child: _state == 'idle'
-                ? _NidIdleContent()
+                ? const _NidIdleContent()
                 : _state == 'scanning'
                 ? const _NidScanningContent()
                 : const _NidDoneContent(),
@@ -429,7 +429,7 @@ class _StepNidScanState extends State<_StepNidScan> {
 
           if (_state == 'idle') ...[
             AppButton(
-              label: 'Open Camera (Back)',
+              label: 'Open Camera',
               icon: Icons.camera_rear_rounded,
               onTap: () => setState(() => _state = 'camera'),
             ),
@@ -447,12 +447,12 @@ class _StepNidScanState extends State<_StepNidScan> {
 
           if (_state == 'done') ...[
             const SizedBox(height: 20),
-            _ExtractedPreview(data: _mock),
+            _ExtractedPreview(data: _extracted),
             const SizedBox(height: 20),
             AppButton(
               label: 'Continue with Extracted Info',
               icon: Icons.arrow_forward_rounded,
-              onTap: () => widget.onNext(_mock),
+              onTap: () => widget.onNext(_extracted),
             ),
             const SizedBox(height: 10),
             AppButton(
@@ -489,6 +489,8 @@ class _StepNidScanState extends State<_StepNidScan> {
 }
 
 class _NidIdleContent extends StatelessWidget {
+  const _NidIdleContent();
+
   @override
   Widget build(BuildContext context) => Column(
     mainAxisAlignment: MainAxisAlignment.center,
@@ -500,20 +502,12 @@ class _NidIdleContent extends StatelessWidget {
           color: AppColors.navyLight,
           borderRadius: BorderRadius.circular(10),
         ),
-        child: const Icon(
-          Icons.credit_card_rounded,
-          size: 28,
-          color: AppColors.navy,
-        ),
+        child: const Icon(Icons.credit_card_rounded, size: 28, color: AppColors.navy),
       ),
       const SizedBox(height: 12),
       const Text(
         'Ready to Scan',
-        style: TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w700,
-          color: AppColors.textPrimary,
-        ),
+        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
       ),
       const SizedBox(height: 4),
       const Text(
@@ -524,16 +518,9 @@ class _NidIdleContent extends StatelessWidget {
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: const [
-          Icon(
-            Icons.camera_rear_rounded,
-            size: 13,
-            color: AppColors.textTertiary,
-          ),
+          Icon(Icons.camera_rear_rounded, size: 13, color: AppColors.textTertiary),
           SizedBox(width: 5),
-          Text(
-            'Back camera • Auto-detect',
-            style: TextStyle(fontSize: 11, color: AppColors.textTertiary),
-          ),
+          Text('Back camera • Auto-detect', style: TextStyle(fontSize: 11, color: AppColors.textTertiary)),
         ],
       ),
     ],
@@ -675,9 +662,6 @@ class _ExtractedPreview extends StatelessWidget {
       ('Full Name', data.fullName),
       ('NID Number', data.nidNumber),
       ('Date of Birth', data.dateOfBirth),
-      ("Father's Name", data.fatherName),
-      ("Mother's Name", data.motherName),
-      ('Address', data.address),
     ];
     return Container(
       decoration: BoxDecoration(
@@ -787,19 +771,20 @@ class _StepPersonalInfo extends StatefulWidget {
 }
 
 class _StepPersonalInfoState extends State<_StepPersonalInfo> {
+  // NID-extracted fields — locked (readOnly) when scanned
   late final TextEditingController _fullName;
   late final TextEditingController _nidNumber;
   late final TextEditingController _dob;
-  late final TextEditingController _fatherName;
-  late final TextEditingController _motherName;
-  late final TextEditingController _address;
+  // Manually entered fields
+  final TextEditingController _fatherName = TextEditingController();
+  final TextEditingController _motherName = TextEditingController();
   final TextEditingController _phone = TextEditingController();
   final TextEditingController _email = TextEditingController();
   final TextEditingController _location = TextEditingController();
-  final TextEditingController _specialty = TextEditingController();
   final TextEditingController _experience = TextEditingController();
+  // Specialty chosen from dropdown
+  String _specialtyValue = '';
 
-  // Validation error flags
   bool _phoneError = false;
   bool _nidError = false;
   bool _locationError = false;
@@ -812,10 +797,6 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
     _fullName = TextEditingController(text: d.fullName);
     _nidNumber = TextEditingController(text: d.nidNumber);
     _dob = TextEditingController(text: d.dateOfBirth);
-    _fatherName = TextEditingController(text: d.fatherName);
-    _motherName = TextEditingController(text: d.motherName);
-    _address = TextEditingController(text: d.address);
-    // Clear errors on change
     _phone.addListener(() {
       if (_phoneError) setState(() => _phoneError = false);
     });
@@ -825,25 +806,14 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
     _location.addListener(() {
       if (_locationError) setState(() => _locationError = false);
     });
-    _specialty.addListener(() {
-      if (_specialtyError) setState(() => _specialtyError = false);
-    });
   }
 
   @override
   void dispose() {
     for (final c in [
-      _fullName,
-      _nidNumber,
-      _dob,
-      _fatherName,
-      _motherName,
-      _address,
-      _phone,
-      _email,
-      _location,
-      _specialty,
-      _experience,
+      _fullName, _nidNumber, _dob,
+      _fatherName, _motherName,
+      _phone, _email, _location, _experience,
     ]) {
       c.dispose();
     }
@@ -856,7 +826,7 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
     final phoneOk = _phone.text.trim().length >= 11;
     final nidOk = _nidNumber.text.trim().length >= 10;
     final locationOk = _location.text.trim().isNotEmpty;
-    final specialtyOk = widget.isClient || _specialty.text.trim().isNotEmpty;
+    final specialtyOk = widget.isClient || _specialtyValue.isNotEmpty;
 
     setState(() {
       _phoneError = !phoneOk;
@@ -870,13 +840,12 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
         fullName: _fullName.text,
         nidNumber: _nidNumber.text,
         dateOfBirth: _dob.text,
-        fatherName: _fatherName.text,
-        motherName: _motherName.text,
-        address: _address.text,
+        fatherName: _fatherName.text.trim(),
+        motherName: _motherName.text.trim(),
         phoneNumber: _phone.text.trim(),
         email: _email.text.trim(),
         location: _location.text.trim(),
-        specialty: _specialty.text.trim(),
+        specialty: _specialtyValue,
         experience: _experience.text.trim(),
       );
       widget.onNext(updatedNidData, '+88${_phone.text.trim()}');
@@ -915,6 +884,7 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
             controller: _fullName,
             icon: Icons.person_outline_rounded,
             autoFilled: _wasScanned,
+            readOnly: _wasScanned,
           ),
           const SizedBox(height: 16),
 
@@ -924,6 +894,7 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
             controller: _nidNumber,
             icon: Icons.credit_card_rounded,
             autoFilled: _wasScanned,
+            readOnly: _wasScanned,
             keyboardType: TextInputType.number,
             required: true,
             error: _nidError ? 'NID number is required' : null,
@@ -935,29 +906,23 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
             controller: _dob,
             icon: Icons.cake_outlined,
             autoFilled: _wasScanned,
+            readOnly: _wasScanned,
             hint: 'DD MMM YYYY',
           ),
           const SizedBox(height: 16),
+
           _SmartField(
             label: "Father's Name",
             controller: _fatherName,
             icon: Icons.person_4_outlined,
-            autoFilled: _wasScanned,
+            hint: 'Enter father\'s full name',
           ),
           const SizedBox(height: 16),
           _SmartField(
             label: "Mother's Name",
             controller: _motherName,
             icon: Icons.person_3_outlined,
-            autoFilled: _wasScanned,
-          ),
-          const SizedBox(height: 16),
-          _SmartField(
-            label: 'Permanent Address (as on NID)',
-            controller: _address,
-            icon: Icons.home_outlined,
-            autoFilled: _wasScanned,
-            maxLines: 2,
+            hint: 'Enter mother\'s full name',
           ),
 
           const SizedBox(height: 24),
@@ -1009,15 +974,13 @@ class _StepPersonalInfoState extends State<_StepPersonalInfo> {
               label: 'PROFESSIONAL INFO',
             ),
             const SizedBox(height: 14),
-            _SmartField(
-              label: 'Your Specialty',
-              controller: _specialty,
-              icon: Icons.build_outlined,
-              hint: 'e.g. Electrician, Plumber...',
-              required: true,
-              error: _specialtyError
-                  ? 'Specialty is required for providers'
-                  : null,
+            _SpecialtyPicker(
+              selected: _specialtyValue,
+              hasError: _specialtyError,
+              onSelected: (v) => setState(() {
+                _specialtyValue = v;
+                _specialtyError = false;
+              }),
             ),
             const SizedBox(height: 16),
             _SmartField(
@@ -1196,7 +1159,6 @@ class _StepSecurityState extends State<_StepSecurity> {
       dateOfBirth: widget.nidData.dateOfBirth,
       fatherName: widget.nidData.fatherName,
       motherName: widget.nidData.motherName,
-      address: widget.nidData.address,
       phoneNumber: widget.nidData.phoneNumber,
       email: widget.nidData.email,
       password: _passwordController.text,
@@ -1569,7 +1531,6 @@ class _StepOtpVerifyState extends State<_StepOtpVerify> {
       dateOfBirth: widget.nidData.dateOfBirth,
       fatherName: widget.nidData.fatherName,
       motherName: widget.nidData.motherName,
-      address: widget.nidData.address,
       password: widget.nidData.password,
     );
 
@@ -2311,14 +2272,14 @@ class _CameraViewfinderState extends State<_CameraViewfinder>
                         ),
                       ),
                       child: Row(
-                        children: const [
-                          Icon(
+                        children: [
+                          const Icon(
                             Icons.camera_rear_rounded,
                             size: 13,
                             color: Colors.white,
                           ),
-                          SizedBox(width: 6),
-                          Text(
+                          const SizedBox(width: 6),
+                          const Text(
                             'Back Camera — NID Scan',
                             style: TextStyle(
                               color: Colors.white,
@@ -2531,22 +2492,22 @@ class _SmartField extends StatelessWidget {
   final TextEditingController controller;
   final IconData icon;
   final bool autoFilled;
+  final bool readOnly;
   final bool required;
   final TextInputType keyboardType;
   final String? hint;
   final String? error;
-  final int maxLines;
 
   const _SmartField({
     required this.label,
     required this.controller,
     required this.icon,
     this.autoFilled = false,
+    this.readOnly = false,
     this.required = false,
     this.keyboardType = TextInputType.text,
     this.hint,
     this.error,
-    this.maxLines = 1,
   });
 
   @override
@@ -2554,11 +2515,15 @@ class _SmartField extends StatelessWidget {
     final hasError = error != null;
     final fillColor = hasError
         ? const Color(0xFFFFEEEE)
+        : readOnly
+        ? const Color(0xFFF0F4F8)
         : autoFilled
         ? const Color(0xFFEBF7F0)
         : AppColors.surface;
     final borderColor = hasError
         ? const Color(0xFFD94040)
+        : readOnly
+        ? AppColors.border
         : autoFilled
         ? AppColors.success.withOpacity(0.45)
         : AppColors.border;
@@ -2605,10 +2570,10 @@ class _SmartField extends StatelessWidget {
         TextField(
           controller: controller,
           keyboardType: keyboardType,
-          maxLines: maxLines,
-          style: const TextStyle(
+          readOnly: readOnly,
+          style: TextStyle(
             fontSize: 15,
-            color: AppColors.textPrimary,
+            color: readOnly ? AppColors.textSecondary : AppColors.textPrimary,
             fontWeight: FontWeight.w500,
           ),
           decoration: InputDecoration(
@@ -2624,6 +2589,8 @@ class _SmartField extends StatelessWidget {
                 size: 18,
                 color: hasError
                     ? const Color(0xFFD94040)
+                    : readOnly
+                    ? AppColors.textTertiary
                     : autoFilled
                     ? AppColors.success
                     : AppColors.textSecondary,
@@ -2647,11 +2614,24 @@ class _SmartField extends StatelessWidget {
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
               borderSide: BorderSide(
-                color: hasError ? const Color(0xFFD94040) : AppColors.navy,
-                width: 1.5,
+                color: readOnly
+                    ? borderColor
+                    : hasError
+                    ? const Color(0xFFD94040)
+                    : AppColors.navy,
+                width: readOnly ? 1 : 1.5,
               ),
             ),
-            suffixIcon: autoFilled
+            suffixIcon: readOnly
+                ? const Padding(
+                    padding: EdgeInsets.only(right: 12),
+                    child: Icon(
+                      Icons.lock_outline_rounded,
+                      size: 14,
+                      color: AppColors.textTertiary,
+                    ),
+                  )
+                : autoFilled
                 ? const Padding(
                     padding: EdgeInsets.only(right: 12),
                     child: Icon(
@@ -2683,6 +2663,114 @@ class _SmartField extends StatelessWidget {
                   color: Color(0xFFD94040),
                   fontWeight: FontWeight.w600,
                 ),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPECIALTY PICKER  —  4 selectable category tiles
+// ─────────────────────────────────────────────────────────────────────────────
+class _SpecialtyPicker extends StatelessWidget {
+  final String selected;
+  final bool hasError;
+  final void Function(String) onSelected;
+
+  const _SpecialtyPicker({
+    required this.selected,
+    required this.hasError,
+    required this.onSelected,
+  });
+
+  static const _options = [
+    (label: 'Electrician', icon: Icons.electrical_services_rounded),
+    (label: 'Plumber',     icon: Icons.plumbing_rounded),
+    (label: 'Cleaner',     icon: Icons.cleaning_services_rounded),
+    (label: 'Painter',     icon: Icons.format_paint_rounded),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text(
+              'YOUR SPECIALTY',
+              style: TextStyle(
+                fontSize: 10,
+                color: AppColors.textSecondary,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.9,
+              ),
+            ),
+            const SizedBox(width: 4),
+            const Text('*', style: TextStyle(fontSize: 12, color: Color(0xFFD94040), fontWeight: FontWeight.w800)),
+          ],
+        ),
+        const SizedBox(height: 10),
+        GridView.count(
+          crossAxisCount: 2,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisSpacing: 10,
+          mainAxisSpacing: 10,
+          childAspectRatio: 2.6,
+          children: _options.map((opt) {
+            final isSelected = selected == opt.label;
+            return GestureDetector(
+              onTap: () => onSelected(opt.label),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                decoration: BoxDecoration(
+                  color: isSelected ? AppColors.navyLight : AppColors.surface,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: hasError && !isSelected
+                        ? const Color(0xFFD94040).withOpacity(0.5)
+                        : isSelected
+                        ? AppColors.navy
+                        : AppColors.border,
+                    width: isSelected ? 1.5 : 1,
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      opt.icon,
+                      size: 18,
+                      color: isSelected ? AppColors.navy : AppColors.textSecondary,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      opt.label,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                        color: isSelected ? AppColors.navy : AppColors.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+        if (hasError) ...[
+          const SizedBox(height: 5),
+          Row(
+            children: const [
+              Icon(Icons.error_outline_rounded, size: 12, color: Color(0xFFD94040)),
+              SizedBox(width: 4),
+              Text(
+                'Please select your specialty',
+                style: TextStyle(fontSize: 11, color: Color(0xFFD94040), fontWeight: FontWeight.w600),
               ),
             ],
           ),

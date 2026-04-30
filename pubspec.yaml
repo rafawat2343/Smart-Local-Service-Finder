@@ -19,6 +19,8 @@ dependencies:
   cloud_firestore: ^6.3.0
   pdf: ^3.10.8
   printing: ^5.13.2
+  google_mlkit_text_recognition: ^0.13.0
+  flutter_tesseract_ocr: ^0.4.24
 
 dev_dependencies:
   flutter_test:
@@ -39,3 +41,5 @@ flutter:
     - assets/images/Local_Background_Image.png
     - assets/images/app_icon/Icon2.png
     - assets/images/Splash_screen_Background_image.png
+    - assets/tessdata/ben.traineddata
+    - assets/tessdata/eng.traineddata

@@ -29,7 +29,6 @@ class DatabaseService {
     required String dateOfBirth,
     required String fatherName,
     required String motherName,
-    required String address,
     String password = '',
   }) async {
     try {
@@ -59,7 +58,6 @@ class DatabaseService {
         'dateOfBirth': dateOfBirth,
         'fatherName': fatherName,
         'motherName': motherName,
-        'address': address,
         'password': password,
         'profileComplete': true,
       };
