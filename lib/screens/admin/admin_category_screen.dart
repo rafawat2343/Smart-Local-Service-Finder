@@ -53,16 +53,16 @@ class _AdminCategoryScreenState extends State<AdminCategoryScreen> {
     // Fallback sample data when no real bookings exist
     if (total == 0) {
       return [
-        _CatData(_categories[0], 32, 32),
-        _CatData(_categories[1], 28, 28),
-        _CatData(_categories[2], 18, 18),
-        _CatData(_categories[3], 22, 22),
+        _CatData(_categories[0], 32, 32.00),
+        _CatData(_categories[1], 28, 28.00),
+        _CatData(_categories[2], 18, 18.00),
+        _CatData(_categories[3], 22, 22.00),
       ];
     }
 
     return _categories.map((cfg) {
       final count = merged[cfg.name] ?? 0;
-      final pct = (count * 100 ~/ total).clamp(0, 100);
+      final pct = (count * 100 / total).clamp(0.0, 100.0);
       return _CatData(cfg, count, pct);
     }).toList();
   }
@@ -165,7 +165,7 @@ class _AdminCategoryScreenState extends State<AdminCategoryScreen> {
                       children: [
                         d.cfg.name,
                         '${d.count}',
-                        '${d.percent}%',
+                        '${d.percent.toStringAsFixed(2)}%',
                       ]
                           .map((c) => pw.Padding(
                                 padding: const pw.EdgeInsets.symmetric(
@@ -200,7 +200,7 @@ class _AdminCategoryScreenState extends State<AdminCategoryScreen> {
   Widget build(BuildContext context) {
     final data = _buildData();
     final totalBookings = (widget.stats['totalBookings'] as int?) ?? 0;
-    final maxPct = data.fold(0, (m, d) => math.max(m, d.percent));
+    final maxPct = data.fold<double>(0, (m, d) => math.max(m, d.percent));
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -373,13 +373,13 @@ class _AdminCategoryScreenState extends State<AdminCategoryScreen> {
 
 class _BigVerticalChart extends StatelessWidget {
   final List<_CatData> data;
-  final int maxPct;
+  final double maxPct;
   const _BigVerticalChart({required this.data, required this.maxPct});
 
   @override
   Widget build(BuildContext context) {
     const barAreaH = 140.0;
-    final effectiveMax = maxPct == 0 ? 1 : maxPct;
+    final effectiveMax = maxPct == 0 ? 1.0 : maxPct;
 
     return Column(
       children: [
@@ -392,7 +392,7 @@ class _BigVerticalChart extends StatelessWidget {
               child: Padding(
                 padding: EdgeInsets.only(right: isLast ? 0 : 12),
                 child: Text(
-                  '${d.percent}%',
+                  '${d.percent.toStringAsFixed(2)}%',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -535,7 +535,7 @@ class _CategoryDetailCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    '${data.percent}%',
+                    '${data.percent.toStringAsFixed(2)}%',
                     style: TextStyle(
                       fontSize: 22,
                       fontWeight: FontWeight.w900,
@@ -585,6 +585,7 @@ class _CatConfig {
 
 class _CatData {
   final _CatConfig cfg;
-  final int count, percent;
+  final int count;
+  final double percent;
   const _CatData(this.cfg, this.count, this.percent);
 }

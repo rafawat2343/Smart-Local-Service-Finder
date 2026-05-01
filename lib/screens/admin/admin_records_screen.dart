@@ -496,10 +496,16 @@ class _BookingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final clientId =
-        (booking['clientId'] ?? 'Unknown').toString();
-    final providerId =
-        (booking['providerId'] ?? 'Unknown').toString();
+    final clientId = (booking['clientId'] ?? '').toString();
+    final providerId = (booking['providerId'] ?? '').toString();
+    final storedClient = (booking['clientName'] ?? '').toString();
+    final storedProvider = (booking['providerName'] ?? '').toString();
+    final clientName = storedClient.isNotEmpty
+        ? storedClient
+        : (clientId.isEmpty ? 'Unknown' : 'Client');
+    final providerName = storedProvider.isNotEmpty
+        ? storedProvider
+        : (providerId.isEmpty ? 'Unknown' : 'Provider');
     final status = (booking['status'] ?? 'pending').toString();
     final price =
         (booking['agreedPrice'] ?? 'N/A').toString();
@@ -556,17 +562,9 @@ class _BookingCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 10),
-            _InfoRow(
-                label: 'Client ID',
-                value: clientId.length > 18
-                    ? '${clientId.substring(0, 18)}...'
-                    : clientId),
+            _InfoRow(label: 'Client', value: clientName),
             const SizedBox(height: 4),
-            _InfoRow(
-                label: 'Provider ID',
-                value: providerId.length > 18
-                    ? '${providerId.substring(0, 18)}...'
-                    : providerId),
+            _InfoRow(label: 'Provider', value: providerName),
             const SizedBox(height: 4),
             _InfoRow(label: 'Agreed Price', value: price),
           ],

@@ -106,7 +106,11 @@ class _BrowseElectriciansScreenState extends State<BrowseElectriciansScreen> {
                     )
                   : null,
               'serviceRadiusKm': (p['serviceRadiusKm'] as int?) ?? 5,
-              'available': p['isAvailable'] ?? true,
+              // Availability follows the ONLINE/OFFLINE badge alone. The
+              // separate `isAvailable` field defaults to false on most legacy
+              // provider docs, so combining the two would mark everyone
+              // unavailable. Missing `isOnline` defaults to online.
+              'available': p['isOnline'] != false,
               'price': p['hourlyRate'] ?? '500',
               'jobs': p['totalJobs'] ?? 0,
             };

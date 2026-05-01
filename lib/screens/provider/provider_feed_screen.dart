@@ -125,9 +125,12 @@ class _FeedHomeState extends State<_FeedHome> {
   bool _isOnline = true;
   bool _isLoading = true;
   List<Map<String, dynamic>> _jobs = [];
+  // clientId → {'name', 'address'} resolved from clients/{uid} so each request
+  // card can show the client's present address rather than just the job's
+  // typed-in location.
+  final Map<String, Map<String, String>> _clientInfo = {};
   String _providerName = 'Provider';
   String _providerInitials = 'P';
-  String _providerLocation = '';
   String _providerSpecialty = '';
   double? _providerLat;
   double? _providerLng;
@@ -151,50 +154,32 @@ class _FeedHomeState extends State<_FeedHome> {
   }
 
   List<Map<String, dynamic>> get _filteredJobs {
-    if (_selectedFilter == 0) return _jobs; // All Jobs
+    if (_selectedFilter == 0) return _jobs; // All
     if (_selectedFilter == 1) {
-      // Nearby — GPS 2 km radius when coords available, else string match
+      // Nearby — only show requests within 2 km of the provider's GPS
+      // location. If we don't have coordinates for the provider yet (or for a
+      // given job), exclude those rows so the filter stays predictable.
       final pLat = _providerLat;
       final pLng = _providerLng;
-      if (pLat != null && pLng != null) {
-        return _jobs.where((j) {
-          final jLat = j['latitude'];
-          final jLng = j['longitude'];
-          if (jLat is num && jLng is num) {
-            return _haversineKm(pLat, pLng, jLat.toDouble(), jLng.toDouble()) <=
-                2.0;
-          }
-          // Fall back to string match for older requests without coords
-          final jobLoc = (j['location'] ?? '').toString().toLowerCase();
-          final provLoc = _providerLocation.toLowerCase();
-          return provLoc.isNotEmpty &&
-              (jobLoc.contains(provLoc) || provLoc.contains(jobLoc));
-        }).toList();
-      }
-      // No provider coords — string match
-      if (_providerLocation.trim().isEmpty) return _jobs;
+      if (pLat == null || pLng == null) return const [];
       return _jobs.where((j) {
-        final jobLoc = (j['location'] ?? '').toString().toLowerCase();
-        final provLoc = _providerLocation.toLowerCase();
-        return jobLoc.contains(provLoc) || provLoc.contains(jobLoc);
+        final jLat = j['latitude'];
+        final jLng = j['longitude'];
+        if (jLat is num && jLng is num) {
+          return _haversineKm(pLat, pLng, jLat.toDouble(), jLng.toDouble()) <=
+              2.0;
+        }
+        return false;
       }).toList();
     }
     if (_selectedFilter == 2) {
-      // Urgent only
-      return _jobs.where((j) => j['isUrgent'] == true).toList();
-    }
-    if (_selectedFilter == 3) {
-      // High Pay — budget > provider's hourly rate
-      if (_providerHourlyRate > 0) {
-        return _jobs
-            .where((j) => _parseBudget(j['budget']) > _providerHourlyRate)
-            .toList();
-      }
-      // If provider rate unknown, sort by budget descending
-      final sorted = List<Map<String, dynamic>>.from(_jobs);
-      sorted.sort((a, b) =>
-          _parseBudget(b['budget']).compareTo(_parseBudget(a['budget'])));
-      return sorted;
+      // High Pay — budget strictly higher than the provider's hourly rate.
+      // When the provider hasn't set a rate, surface nothing rather than
+      // pretending every job qualifies.
+      if (_providerHourlyRate <= 0) return const [];
+      return _jobs
+          .where((j) => _parseBudget(j['budget']) > _providerHourlyRate)
+          .toList();
     }
     return _jobs;
   }
@@ -207,7 +192,19 @@ class _FeedHomeState extends State<_FeedHome> {
   @override
   void initState() {
     super.initState();
+    // Default everyone to ONLINE on app entry. Sign-out cleanup writes
+    // isOnline:false, so without this the provider would silently stay
+    // offline (and hidden from clients) until they tapped the badge.
+    _markOnlineOnEntry();
     _loadData();
+  }
+
+  Future<void> _markOnlineOnEntry() async {
+    final userId = AuthService.getCurrentUserId();
+    if (userId == null) return;
+    try {
+      await DatabaseService.setUserStatus(userId: userId, isOnline: true);
+    } catch (_) {}
   }
 
   Future<void> _loadData() async {
@@ -238,12 +235,46 @@ class _FeedHomeState extends State<_FeedHome> {
           : 'P';
       final specialty =
           profile?['serviceType'] ?? profile?['specialty'] ?? '';
-      final location = profile?['location'] ?? profile?['address'] ?? '';
+
+      // Pull the data the filter widgets need: GPS for Nearby, hourly rate for
+      // High Pay. The online flag is intentionally NOT read here — the toggle
+      // owns that state for the session, and we already wrote isOnline:true on
+      // initState so a stale "false" from sign-out cleanup can't override it.
+      double? lat;
+      double? lng;
+      if (profile?['latitude'] is num) {
+        lat = (profile!['latitude'] as num).toDouble();
+      }
+      if (profile?['longitude'] is num) {
+        lng = (profile!['longitude'] as num).toDouble();
+      }
+      final rateRaw = (profile?['hourlyRate'] ?? profile?['price'] ?? '0')
+          .toString();
+      final rate = int.tryParse(rateRaw.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
 
       // Load jobs filtered by this provider's specialty
       final jobs = specialty.isNotEmpty
           ? await DatabaseService.getOpenRequests(category: specialty)
           : await DatabaseService.getOpenRequests();
+
+      // Resolve each unique clientId to a name + present address so request
+      // cards can label the poster and surface where the work is needed.
+      final clientIds = jobs
+          .map((j) => (j['clientId'] ?? '').toString())
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      final Map<String, Map<String, String>> clientInfo = {};
+      for (final id in clientIds) {
+        try {
+          final c = await DatabaseService.getClientProfile(id);
+          if (c == null) continue;
+          clientInfo[id] = {
+            'name': (c['displayName'] ?? c['name'] ?? 'Client').toString(),
+            'address':
+                (c['location'] ?? c['address'] ?? '').toString().trim(),
+          };
+        } catch (_) {}
+      }
 
       // Load real stats
       final stats = await DatabaseService.getProviderStats(userId);
@@ -256,9 +287,14 @@ class _FeedHomeState extends State<_FeedHome> {
         setState(() {
           _providerName = name;
           _providerInitials = initials;
-          _providerLocation = location.toString();
           _providerSpecialty = specialty.toString();
+          _providerLat = lat;
+          _providerLng = lng;
+          _providerHourlyRate = rate;
           _jobs = jobs;
+          _clientInfo
+            ..clear()
+            ..addAll(clientInfo);
           _todayJobs = stats['activeJobs'] ?? 0;
           _monthJobs = stats['totalJobs'] ?? 0;
           _earnings = earningsStr;
@@ -550,7 +586,7 @@ class _FeedHomeState extends State<_FeedHome> {
                     height: 30,
                     child: ListView(
                       scrollDirection: Axis.horizontal,
-                      children: ['All Jobs', 'Nearby', 'Urgent', 'High Pay']
+                      children: ['All', 'Nearby', 'High Pay']
                           .asMap()
                           .entries
                           .map(
@@ -711,31 +747,38 @@ class _FeedHomeState extends State<_FeedHome> {
                                   ),
                                   const SizedBox(width: 10),
                                   Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          category,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w700,
-                                            fontSize: 14,
-                                            color: AppColors.textPrimary,
+                                    child: Builder(builder: (_) {
+                                      final cid =
+                                          (job['clientId'] ?? '').toString();
+                                      final info = _clientInfo[cid];
+                                      final clientName =
+                                          info?['name'] ?? 'Client';
+                                      return Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            category,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                              fontSize: 14,
+                                              color: AppColors.textPrimary,
+                                            ),
                                           ),
-                                        ),
-                                        Text(
-                                          'Posted by ${job['clientId'] ?? 'Client'}',
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontSize: 11,
-                                            color: AppColors.textTertiary,
+                                          Text(
+                                            'Posted by $clientName',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: AppColors.textTertiary,
+                                            ),
                                           ),
-                                        ),
-                                      ],
-                                    ),
+                                        ],
+                                      );
+                                    }),
                                   ),
                                   const SizedBox(width: 8),
                                   if (isUrgent)
@@ -776,27 +819,37 @@ class _FeedHomeState extends State<_FeedHome> {
                           child: Row(
                             children: [
                               Expanded(
-                                child: Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.location_on_outlined,
-                                      size: 12,
-                                      color: AppColors.textTertiary,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Expanded(
-                                      child: Text(
-                                        '${job['location'] ?? 'Location not set'}',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          color: AppColors.textTertiary,
+                                child: Builder(builder: (_) {
+                                  final cid =
+                                      (job['clientId'] ?? '').toString();
+                                  final clientAddr =
+                                      _clientInfo[cid]?['address'] ?? '';
+                                  final addr = clientAddr.isNotEmpty
+                                      ? clientAddr
+                                      : (job['location'] ?? 'Location not set')
+                                          .toString();
+                                  return Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.location_on_outlined,
+                                        size: 12,
+                                        color: AppColors.textTertiary,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Expanded(
+                                        child: Text(
+                                          addr,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: AppColors.textTertiary,
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                  ],
-                                ),
+                                    ],
+                                  );
+                                }),
                               ),
                               Text(
                                 '৳${job['budget'] ?? '0'}',
@@ -2069,6 +2122,10 @@ class _BookingRequestsScreenState extends State<_BookingRequestsScreen> {
                   final cp = _clientCache[cid];
                   final name = (cp?['displayName'] ?? cp?['name'] ?? 'Client')
                       .toString();
+                  final clientAddress =
+                      (cp?['location'] ?? cp?['address'] ?? '')
+                          .toString()
+                          .trim();
                   final desc = (b['description'] ?? '').toString();
                   final price = (b['agreedPrice'] ?? '').toString();
                   return Container(
@@ -2097,13 +2154,42 @@ class _BookingRequestsScreenState extends State<_BookingRequestsScreen> {
                             ),
                             const SizedBox(width: 12),
                             Expanded(
-                              child: Text(
-                                name,
-                                style: const TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.navy,
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    name,
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w700,
+                                      color: AppColors.navy,
+                                    ),
+                                  ),
+                                  if (clientAddress.isNotEmpty) ...[
+                                    const SizedBox(height: 2),
+                                    Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.location_on_outlined,
+                                          size: 12,
+                                          color: AppColors.textTertiary,
+                                        ),
+                                        const SizedBox(width: 3),
+                                        Expanded(
+                                          child: Text(
+                                            clientAddress,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: AppColors.textTertiary,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
                             GestureDetector(

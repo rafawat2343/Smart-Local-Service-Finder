@@ -424,15 +424,29 @@ class DatabaseService {
   // ──────────────────────────────────────────────────────────────────────────
 
   /// Set user online/offline status
+  ///
+  /// Writes to BOTH `users/{uid}` and `providers/{uid}` so the value can't be
+  /// shadowed by stale data when `getProviderProfile` merges the two
+  /// collections (provider data wins in that merge). Uses `set(merge:true)`
+  /// instead of `update()` so a missing document or missing field can't make
+  /// the write silently fail.
   static Future<void> setUserStatus({
     required String userId,
     required bool isOnline,
   }) async {
     try {
-      await _firestore.collection(usersCollection).doc(userId).update({
+      final payload = {
         'isOnline': isOnline,
         'lastActive': FieldValue.serverTimestamp(),
-      });
+      };
+      await _firestore
+          .collection(usersCollection)
+          .doc(userId)
+          .set(payload, SetOptions(merge: true));
+      await _firestore
+          .collection(providersCollection)
+          .doc(userId)
+          .set(payload, SetOptions(merge: true));
     } catch (e) {
       throw Exception('Failed to update user status: $e');
     }
@@ -1217,8 +1231,11 @@ class DatabaseService {
 
   static Future<void> signOutCleanup(String userId) async {
     try {
+      // Don't flip isOnline:false on sign-out — the toggle on the provider
+      // feed is the only switch users explicitly control, and clobbering it
+      // here meant providers reappeared as Unavailable to clients on every
+      // re-sign-in until the next app launch wrote it back to true.
       await _firestore.collection(usersCollection).doc(userId).set({
-        'isOnline': false,
         'lastActive': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
@@ -1348,10 +1365,35 @@ class DatabaseService {
 
   static Future<List<Map<String, dynamic>>> getAllBookings() async {
     try {
-      final snap = await _firestore.collection(bookingsCollection).get();
-      final bookings = snap.docs
-          .map((doc) => {'id': doc.id, ...doc.data()})
-          .toList();
+      final results = await Future.wait([
+        _firestore.collection(bookingsCollection).get(),
+        _firestore.collection(usersCollection).get(),
+      ]);
+      final bookingsSnap = results[0];
+      final usersSnap = results[1];
+
+      // Build userId → displayName map so legacy bookings that never stored a
+      // denormalized clientName/providerName still resolve to a real name.
+      final Map<String, String> userNames = {};
+      for (final doc in usersSnap.docs) {
+        final name = (doc.data()['displayName'] ?? '').toString();
+        if (name.isNotEmpty) userNames[doc.id] = name;
+      }
+
+      final bookings = bookingsSnap.docs.map((doc) {
+        final data = {'id': doc.id, ...doc.data()};
+        final cid = (data['clientId'] ?? '').toString();
+        final pid = (data['providerId'] ?? '').toString();
+        if ((data['clientName'] ?? '').toString().isEmpty &&
+            userNames[cid] != null) {
+          data['clientName'] = userNames[cid];
+        }
+        if ((data['providerName'] ?? '').toString().isEmpty &&
+            userNames[pid] != null) {
+          data['providerName'] = userNames[pid];
+        }
+        return data;
+      }).toList();
       _sortByCreatedAtDesc(bookings);
       return bookings;
     } catch (e) {
@@ -2161,6 +2203,23 @@ class DatabaseService {
       safeFetch(reviewsCollection),
     ]);
 
+    // Build a userId → displayName map so legacy records that never persisted
+    // a denormalized name still surface a real name in the activity feed.
+    final Map<String, String> userNames = {};
+    for (final data in results[2]) {
+      final id = (data['id'] ?? '').toString();
+      final name = (data['displayName'] ?? '').toString();
+      if (id.isNotEmpty && name.isNotEmpty) userNames[id] = name;
+    }
+
+    String resolveName(Map<String, dynamic> data, String preferredKey,
+        String idKey) {
+      final stored = (data[preferredKey] ?? '').toString();
+      if (stored.isNotEmpty) return stored;
+      final id = (data[idKey] ?? '').toString();
+      return userNames[id] ?? 'Unknown';
+    }
+
     // Bookings — emit a "task complete" item separately so admin notifications
     // can surface only feedback + completed tasks while the activity feed keeps
     // the full history.
@@ -2169,7 +2228,7 @@ class DatabaseService {
       activities.add({
         'type': 'booking',
         'status': status,
-        'name': (data['clientName'] ?? 'Unknown').toString(),
+        'name': resolveName(data, 'clientName', 'clientId'),
         'subtitle': status == 'completed'
             ? 'Task completed'
             : 'New booking created',
@@ -2186,7 +2245,7 @@ class DatabaseService {
       activities.add({
         'type': 'report',
         'status': status,
-        'name': (data['clientName'] ?? 'Unknown').toString(),
+        'name': resolveName(data, 'clientName', 'clientId'),
         'subtitle': status == 'reviewed'
             ? 'Admin feedback sent'
             : 'Complaint raised',
@@ -2210,9 +2269,13 @@ class DatabaseService {
 
     // Reviews — clients giving feedback to providers.
     for (final data in results[3]) {
+      final stored = (data['clientName'] ?? data['reviewerName'] ?? '').toString();
+      final name = stored.isNotEmpty
+          ? stored
+          : (userNames[(data['clientId'] ?? '').toString()] ?? 'Unknown');
       activities.add({
         'type': 'review',
-        'name': (data['clientName'] ?? data['reviewerName'] ?? 'Unknown').toString(),
+        'name': name,
         'subtitle': 'Review submitted',
         'timestamp': data['createdAt'],
       });

@@ -105,7 +105,7 @@ class _BrowsePlumbersScreenState extends State<BrowsePlumbersScreen> {
                     )
                   : null,
               'serviceRadiusKm': (p['serviceRadiusKm'] as int?) ?? 5,
-              'available': p['isAvailable'] ?? true,
+              'available': p['isOnline'] != false,
               'price': p['hourlyRate'] ?? '500',
               'jobs': p['totalJobs'] ?? 0,
             };

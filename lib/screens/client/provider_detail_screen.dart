@@ -147,9 +147,13 @@ class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
           );
     final livePriceValue =
         (merged['hourlyRate'] ?? merged['price'] ?? widget.price).toString();
-    final liveAvailable =
-        (merged['isAvailable'] ?? merged['available'] ?? widget.available) ==
-        true;
+    // Availability is driven solely by the ONLINE/OFFLINE badge the provider
+    // controls from their feed. The legacy `isAvailable` toggle on the edit
+    // profile sheet defaults to `false` for new providers (its getter checks
+    // `== true` against a null field), so honoring it here would mark every
+    // provider unavailable until they manually toggled it. Treat any non-false
+    // `isOnline` value (including missing/null) as available.
+    final liveAvailable = merged['isOnline'] != false;
     final liveJobs = _toInt(
       merged['jobsCompleted'] ?? merged['jobs'],
       fallback: widget.jobs,
@@ -270,11 +274,7 @@ class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
           profile['distance'],
           fallback: widget.distance,
         );
-        final available =
-            (profile['isAvailable'] ??
-                profile['available'] ??
-                widget.available) ==
-            true;
+        final available = profile['isOnline'] != false;
         final price =
             (profile['hourlyRate'] ?? profile['price'] ?? widget.price)
                 .toString();

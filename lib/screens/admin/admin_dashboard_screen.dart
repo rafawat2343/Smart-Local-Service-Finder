@@ -172,6 +172,22 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     final totalUsers = _stats['totalUsers'] ?? 0;
     final totalProviders = _stats['totalProviders'] ?? 0;
 
+    // Overall Health Score — average of the same four metrics shown on the
+    // Platform Health screen so the hero number stays consistent with the
+    // detail view.
+    final activeProvPct  = (_stats['activeProviderPct']   as int?) ?? 0;
+    final bookingCompPct = (_stats['bookingCompletionPct'] as int?) ?? 0;
+    final avgRating      = (_stats['avgRating']           as double?) ?? 0.0;
+    final resolvedPct    = (_stats['resolvedReportsPct']  as int?) ?? 0;
+    final ratingPct      = (avgRating / 5.0 * 100).round().clamp(0, 100);
+    final healthScore    =
+        (activeProvPct + bookingCompPct + ratingPct + resolvedPct) ~/ 4;
+    final healthColor = healthScore >= 80
+        ? const Color(0xFF2ECC71)
+        : healthScore >= 60
+            ? const Color(0xFFE67E22)
+            : const Color(0xFFE74C3C);
+
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
       padding: const EdgeInsets.all(22),
@@ -251,10 +267,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     label: '$totalProviders Providers',
                     color: const Color(0xFF2ECC71),
                   ),
-                  const _HeroChip(
-                    icon: Icons.check_circle_rounded,
-                    label: '98.2% Uptime',
-                    color: Color(0xFF2ECC71),
+                  _HeroChip(
+                    icon: Icons.favorite_rounded,
+                    label: '$healthScore% Health Score',
+                    color: healthColor,
                   ),
                 ],
               ),
@@ -528,12 +544,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     final displayTotal = entries.fold(0, (s, e) => s + e.value);
 
     final catMetrics = entries.asMap().entries.map((e) {
-      final pct = displayTotal == 0 ? 0 : (e.value.value * 100 ~/ displayTotal);
+      final pct = displayTotal == 0 ? 0.0 : (e.value.value * 100 / displayTotal);
       return _HealthData(
         e.value.key,
-        pct,
+        pct.round(),
         colors[e.key % colors.length],
-        '$pct%',
+        '${pct.toStringAsFixed(2)}%',
       );
     }).toList();
 
