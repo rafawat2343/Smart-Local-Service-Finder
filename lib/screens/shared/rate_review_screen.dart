@@ -29,6 +29,7 @@ class _RateReviewScreenState extends State<RateReviewScreen> {
   int _rating = 5;
   final TextEditingController _reviewCtrl = TextEditingController();
   bool _submitting = false;
+  int _pendingPoints = 0;
 
   static const _labels = ['Poor', 'Below Average', 'Average', 'Good', 'Excellent'];
   static const _labelColors = [
@@ -36,12 +37,57 @@ class _RateReviewScreenState extends State<RateReviewScreen> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _reviewCtrl.addListener(() => setState(() {}));
+    _loadPendingPoints();
+  }
+
+  Future<void> _loadPendingPoints() async {
+    if (widget.bookingId.isEmpty) return;
+    final pts =
+        await DatabaseService.getPendingReviewPoints(widget.bookingId);
+    if (mounted) setState(() => _pendingPoints = pts);
+  }
+
+  @override
   void dispose() {
     _reviewCtrl.dispose();
     super.dispose();
   }
 
+  Future<bool> _confirmStarsOnly() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Skip the written review?'),
+        content: Text(
+          _pendingPoints > 0
+              ? 'You\'ll lose $_pendingPoints reward points if you submit without a written review.'
+              : 'Adding a written review helps other clients pick the right provider.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Add review'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Submit anyway'),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
   Future<void> _submitReview() async {
+    final hasText = _reviewCtrl.text.trim().isNotEmpty;
+    if (!hasText) {
+      final ok = await _confirmStarsOnly();
+      if (!ok) return;
+    }
+
     setState(() => _submitting = true);
 
     final hasNet = await ConnectivityService.hasInternet();
@@ -109,6 +155,14 @@ class _RateReviewScreenState extends State<RateReviewScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (_pendingPoints > 0) ...[
+                _PointsBanner(
+                  pendingPoints: _pendingPoints,
+                  hasText: _reviewCtrl.text.trim().isNotEmpty,
+                  rating: _rating,
+                ),
+                const SizedBox(height: 16),
+              ],
               // Provider card
               CorpCard(
                 padding: const EdgeInsets.all(20),
@@ -226,4 +280,80 @@ class _SectionLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Text(label,
       style: const TextStyle(fontSize: 10, color: AppColors.textTertiary, fontWeight: FontWeight.w700, letterSpacing: 1.0));
+}
+
+class _PointsBanner extends StatelessWidget {
+  final int pendingPoints;
+  final bool hasText;
+  final int rating;
+
+  const _PointsBanner({
+    required this.pendingPoints,
+    required this.hasText,
+    required this.rating,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final qualifies = hasText && rating > 0;
+    final color = qualifies ? AppColors.success : AppColors.star;
+    final bg = qualifies ? AppColors.successBg : AppColors.starBg;
+    final icon =
+        qualifies ? Icons.check_circle_rounded : Icons.stars_rounded;
+    final headline = qualifies
+        ? 'Earn $pendingPoints points on submit'
+        : 'Earn $pendingPoints points for this booking';
+    final detail = qualifies
+        ? 'Stars + written review — points will be credited.'
+        : 'Submit BOTH a star rating AND a written review to earn points. Stars alone won\'t add points.';
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.35)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.18),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, size: 18, color: color),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  headline,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  detail,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: AppColors.textSecondary,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

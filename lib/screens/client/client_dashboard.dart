@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:geocoding/geocoding.dart';
-import 'package:geolocator/geolocator.dart';
 import '../../services/auth_service.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/database_service.dart';
@@ -14,6 +12,8 @@ import '../shared/chat_screen.dart';
 import '../shared/rate_review_screen.dart';
 import 'client_notifications_screen.dart';
 import 'client_profile_screen.dart';
+import 'points_history_screen.dart';
+import '../shared/location_picker_screen.dart';
 
 class ClientDashboard extends StatefulWidget {
   const ClientDashboard({super.key});
@@ -130,6 +130,7 @@ class _DashboardHomeState extends State<_DashboardHome> {
   int _active = 0;
   int _completed = 0;
   int _providerCount = 0;
+  int _pointsBalance = 0;
   String _userName = 'User';
   String _searchQuery = '';
   bool _isLoading = true;
@@ -205,6 +206,7 @@ class _DashboardHomeState extends State<_DashboardHome> {
 
       final stats = await DatabaseService.getClientStats(userId);
       final provCount = await DatabaseService.getUserCountByType('provider');
+      final pointsBalance = await DatabaseService.getPointsBalance(userId);
 
       // Load requests — may fail if composite index not yet created
       List<Map<String, dynamic>> requests = [];
@@ -239,6 +241,7 @@ class _DashboardHomeState extends State<_DashboardHome> {
           _active = stats['active'] ?? 0;
           _completed = stats['completed'] ?? 0;
           _providerCount = provCount;
+          _pointsBalance = pointsBalance;
           _userName = name;
           _recentRequests = requests.take(5).toList();
           _unreadNotifications = notifCount;
@@ -262,54 +265,6 @@ class _DashboardHomeState extends State<_DashboardHome> {
         type == 'booking_rejected' ||
         type == 'payment_due') {
       widget.onSwitchTab?.call(2); // Bookings tab
-    }
-  }
-
-  Future<void> _detectLocation(
-    TextEditingController ctrl,
-    void Function(void Function()) setSt,
-    void Function(double lat, double lng) onDetected,
-  ) async {
-    try {
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.deniedForever ||
-          permission == LocationPermission.denied) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location permission denied')),
-          );
-        }
-        return;
-      }
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
-      String address =
-          '${pos.latitude.toStringAsFixed(4)}, ${pos.longitude.toStringAsFixed(4)}';
-      try {
-        final marks =
-            await placemarkFromCoordinates(pos.latitude, pos.longitude);
-        if (marks.isNotEmpty) {
-          final p = marks.first;
-          final parts = [p.subLocality, p.locality, p.administrativeArea]
-              .where((s) => s != null && s.isNotEmpty)
-              .map((s) => s!)
-              .toList();
-          if (parts.isNotEmpty) address = parts.join(', ');
-        }
-      } catch (_) {}
-      ctrl.text = address;
-      onDetected(pos.latitude, pos.longitude);
-      setSt(() {});
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not detect location: $e')),
-        );
-      }
     }
   }
 
@@ -477,19 +432,25 @@ class _DashboardHomeState extends State<_DashboardHome> {
                       prefixIconConstraints: const BoxConstraints(),
                       suffixIcon: IconButton(
                         icon: const Icon(
-                          Icons.my_location_rounded,
+                          Icons.map_rounded,
                           size: 18,
                           color: AppColors.navy,
                         ),
-                        tooltip: 'Use current location',
-                        onPressed: () => _detectLocation(
-                          locationCtrl,
-                          setSheetState,
-                          (lat, lng) {
-                            detectedLat = lat;
-                            detectedLng = lng;
-                          },
-                        ),
+                        tooltip: 'Pick on map',
+                        onPressed: () async {
+                          final picked = await LocationPickerScreen.pick(
+                            ctx,
+                            initialLatitude: detectedLat,
+                            initialLongitude: detectedLng,
+                          );
+                          if (picked != null) {
+                            setSheetState(() {
+                              locationCtrl.text = picked.address;
+                              detectedLat = picked.latitude;
+                              detectedLng = picked.longitude;
+                            });
+                          }
+                        },
                       ),
                       filled: true,
                       fillColor: AppColors.surfaceAlt,
@@ -840,6 +801,25 @@ class _DashboardHomeState extends State<_DashboardHome> {
             ),
           ),
 
+          // ── Points reward card ───────────────────────────────────────────
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+              child: _PointsCard(
+                balance: _pointsBalance,
+                onTap: () async {
+                  await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const PointsHistoryScreen(),
+                    ),
+                  );
+                  _loadStats();
+                },
+              ),
+            ),
+          ),
+
           // ── Categories ───────────────────────────────────────────────────
           SliverToBoxAdapter(
             child: Padding(
@@ -1029,6 +1009,77 @@ class _StatChip extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ─── Points Card ──────────────────────────────────────────────────────────────
+
+class _PointsCard extends StatelessWidget {
+  final int balance;
+  final VoidCallback onTap;
+  const _PointsCard({required this.balance, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final discountValue = DatabaseService.computeDiscountForPoints(balance);
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: AppColors.starBg,
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: const Icon(
+                Icons.stars_rounded,
+                color: AppColors.star,
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '$balance points',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '≈ ৳$discountValue in discounts • Tap for history',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: AppColors.textTertiary,
+              size: 20,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1713,75 +1764,305 @@ class _BookingsScreenState extends State<_BookingsScreen> {
   Future<void> _makePayment(Map<String, dynamic> booking) async {
     final total = booking['totalAmount'];
     final hours = booking['hoursWorked'];
-    final totalStr = total == null
-        ? '0'
-        : (total is num ? total.toStringAsFixed(0) : total.toString());
-    final confirmed = await showDialog<bool>(
+    final totalInt = total is num ? total.toInt() : 0;
+    final totalStr = totalInt > 0
+        ? totalInt.toString()
+        : (total == null ? '0' : total.toString());
+
+    // Existing booking-time redemption (already locked in at createBooking).
+    int existingDiscount = 0;
+    int existingPointsRedeemed = 0;
+    final ed = booking['discountTaka'];
+    if (ed is num) existingDiscount = ed.toInt();
+    final ep = booking['pointsRedeemed'];
+    if (ep is num) existingPointsRedeemed = ep.toInt();
+
+    final clientId = AuthService.getCurrentUserId() ?? '';
+    final balance = clientId.isEmpty
+        ? 0
+        : await DatabaseService.getPointsBalance(clientId);
+    if (!mounted) return;
+
+    final result = await showModalBottomSheet<int>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: const Text(
-          'Confirm Payment',
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: AppColors.navyLight,
-                borderRadius: BorderRadius.circular(8),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) {
+        int payNowPoints = 0;
+        bool useRedemption = false;
+        return StatefulBuilder(
+          builder: (ctx, setSt) {
+            // Cap the slider so the new discount can't exceed the bill.
+            final maxNewDiscount =
+                (totalInt - existingDiscount).clamp(0, totalInt);
+            final sliderMax =
+                (maxNewDiscount * 2).clamp(0, balance);
+            if (payNowPoints > sliderMax) {
+              payNowPoints = sliderMax;
+            }
+            final payNowDiscount =
+                DatabaseService.computeDiscountForPoints(payNowPoints);
+            final totalDiscount = existingDiscount + payNowDiscount;
+            final dueNow =
+                (totalInt - totalDiscount).clamp(0, totalInt);
+
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(ctx).viewInsets.bottom,
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (hours != null)
-                    Text(
-                      'Hours worked: $hours',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: AppColors.textSecondary,
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: AppColors.border,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
                       ),
                     ),
-                  if (hours != null) const SizedBox(height: 4),
-                  Text(
-                    'Total: ৳$totalStr',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                      color: AppColors.navy,
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Confirm Payment',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.navy,
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.navyLight,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (hours != null)
+                            Text(
+                              'Hours worked: $hours',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: AppColors.textSecondary,
+                              ),
+                            ),
+                          if (hours != null) const SizedBox(height: 4),
+                          Text(
+                            'Total bill: ৳$totalStr',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                              color: AppColors.navy,
+                            ),
+                          ),
+                          if (existingPointsRedeemed > 0) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              'Booking discount: −৳$existingDiscount '
+                              '($existingPointsRedeemed pts)',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: AppColors.success,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    if (balance > 0)
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppColors.starBg,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: AppColors.star.withOpacity(0.3),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(
+                                  Icons.stars_rounded,
+                                  color: AppColors.star,
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'You have $balance points',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w800,
+                                      color: AppColors.navy,
+                                    ),
+                                  ),
+                                ),
+                                if (balance >=
+                                        DatabaseService
+                                            .minPointsRedemption &&
+                                    sliderMax >= 1)
+                                  Switch.adaptive(
+                                    value: useRedemption,
+                                    activeColor: AppColors.accent,
+                                    onChanged: (v) {
+                                      setSt(() {
+                                        useRedemption = v;
+                                        payNowPoints = v
+                                            ? DatabaseService
+                                                .minPointsRedemption
+                                                .clamp(0, sliderMax)
+                                            : 0;
+                                      });
+                                    },
+                                  )
+                                else
+                                  const SizedBox.shrink(),
+                              ],
+                            ),
+                            if (useRedemption && sliderMax >= 1) ...[
+                              Slider(
+                                value: payNowPoints
+                                    .toDouble()
+                                    .clamp(1, sliderMax.toDouble()),
+                                min: 1,
+                                max: sliderMax.toDouble(),
+                                divisions:
+                                    (sliderMax - 1).clamp(1, sliderMax),
+                                activeColor: AppColors.accent,
+                                label: '$payNowPoints pts',
+                                onChanged: (v) {
+                                  setSt(() {
+                                    payNowPoints = v.round();
+                                  });
+                                },
+                              ),
+                              Text(
+                                'Use $payNowPoints pts → save ৳$payNowDiscount',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.success,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    if (balance > 0) const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.successBg,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: AppColors.success.withOpacity(0.3),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Text(
+                            'Due now',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                          const Spacer(),
+                          Text(
+                            '৳$dueNow',
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.success,
+                              letterSpacing: -0.4,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 14,
+                              ),
+                              side: const BorderSide(color: AppColors.border),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            child: const Text(
+                              'Cancel',
+                              style: TextStyle(
+                                color: AppColors.textSecondary,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          flex: 2,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.success,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 14,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            onPressed: () => Navigator.pop(
+                              ctx,
+                              useRedemption ? payNowPoints : 0,
+                            ),
+                            child: Text(
+                              'Pay ৳$dueNow now',
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Marking this payment as sent will complete the booking.',
-              style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.success,
-              foregroundColor: Colors.white,
-              elevation: 0,
-            ),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Pay Now'),
-          ),
-        ],
-      ),
+            );
+          },
+        );
+      },
     );
-    if (confirmed != true) return;
+
+    if (result == null) return; // user cancelled
+    final paymentTimePoints = result;
 
     final hasNet = await ConnectivityService.hasInternet();
     if (!hasNet) {
@@ -1794,22 +2075,32 @@ class _BookingsScreenState extends State<_BookingsScreen> {
     }
 
     try {
-      await DatabaseService.markBookingPaid(bookingId: booking['id']);
+      await DatabaseService.markBookingPaid(
+        bookingId: booking['id'],
+        paymentTimePointsToRedeem: paymentTimePoints,
+      );
       final providerId = (booking['providerId'] ?? '').toString();
+      final paid = (totalInt - existingDiscount -
+              DatabaseService.computeDiscountForPoints(paymentTimePoints))
+          .clamp(0, totalInt);
       if (providerId.isNotEmpty) {
         await DatabaseService.createNotification(
           userId: providerId,
           type: 'payment_received',
           title: 'Payment received',
-          message: 'Client has paid ৳$totalStr. Booking marked as completed.',
+          message: 'Client has paid ৳$paid. Booking marked as completed.',
           bookingId: (booking['id'] ?? '').toString(),
           extra: {'totalAmount': total},
         );
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Payment complete. Thank you!'),
+          SnackBar(
+            content: Text(
+              paymentTimePoints > 0
+                  ? 'Payment complete. $paymentTimePoints pts redeemed.'
+                  : 'Payment complete. Thank you!',
+            ),
             backgroundColor: AppColors.success,
           ),
         );
@@ -2036,6 +2327,13 @@ class _BookingsScreenState extends State<_BookingsScreen> {
                             ],
                           ),
                         ],
+                        if ((b['pointsRedeemed'] is num
+                                ? (b['pointsRedeemed'] as num).toInt()
+                                : 0) >
+                            0) ...[
+                          const SizedBox(height: 10),
+                          _RedemptionBreakdown(booking: b),
+                        ],
                         if ((b['status'] ?? '') == 'awaiting_payment') ...[
                           const SizedBox(height: 12),
                           _PaymentCallout(
@@ -2107,7 +2405,50 @@ class _BookingsScreenState extends State<_BookingsScreen> {
                                 ],
                               ),
                             )
-                          else
+                          else ...[
+                            if ((b['paid'] == true) &&
+                                (b['pointsRecorded'] != true) &&
+                                ((b['pointsEarnedByClient'] is num
+                                        ? (b['pointsEarnedByClient'] as num)
+                                            .toInt()
+                                        : 0) >
+                                    0))
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 6),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.starBg,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: AppColors.star.withOpacity(0.3),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.stars_rounded,
+                                        size: 13,
+                                        color: AppColors.star,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          'Earn ${(b['pointsEarnedByClient'] as num).toInt()} pts when you rate AND review',
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: AppColors.navy,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
                             SizedBox(
                               width: double.infinity,
                               height: 36,
@@ -2134,6 +2475,7 @@ class _BookingsScreenState extends State<_BookingsScreen> {
                                 ),
                               ),
                             ),
+                          ],
                         ],
                       ],
                     ),
@@ -2186,6 +2528,58 @@ class _BookingsScreenState extends State<_BookingsScreen> {
   String _formatAmount(dynamic value) {
     if (value is num) return value.toStringAsFixed(0);
     return value.toString();
+  }
+}
+
+class _RedemptionBreakdown extends StatelessWidget {
+  final Map<String, dynamic> booking;
+  const _RedemptionBreakdown({required this.booking});
+
+  int _toInt(dynamic v) {
+    if (v is num) return v.toInt();
+    if (v is String) {
+      return int.tryParse(v.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+    }
+    return 0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pointsRedeemed = _toInt(booking['pointsRedeemed']);
+    final discount = _toInt(booking['discountTaka']) > 0
+        ? _toInt(booking['discountTaka'])
+        : DatabaseService.computeDiscountForPoints(pointsRedeemed);
+    final agreed = _toInt(booking['agreedAmountTaka']) > 0
+        ? _toInt(booking['agreedAmountTaka'])
+        : _toInt(booking['agreedPrice']);
+    final paid = _toInt(booking['paidAmountTaka']) > 0
+        ? _toInt(booking['paidAmountTaka'])
+        : (agreed - discount).clamp(0, agreed);
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppColors.starBg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.star.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.stars_rounded, size: 14, color: AppColors.star),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'Agreed: ৳$agreed   Discount: −৳$discount   You paid: ৳$paid ($pointsRedeemed pts used)',
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: AppColors.navy,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

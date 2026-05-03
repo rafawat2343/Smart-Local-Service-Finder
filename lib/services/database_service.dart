@@ -13,6 +13,37 @@ class DatabaseService {
   static const String messagesCollection = 'messages';
   static const String reviewsCollection = 'reviews';
   static const String notificationsCollection = 'notifications';
+  static const String transactionsCollection = 'transactions';
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // REWARD / COMMISSION POLICY (single source of truth)
+  // ──────────────────────────────────────────────────────────────────────────
+  static const int pointsPerTakaSpent = 1;       // 1 pt per ৳100
+  static const int pointsTakaDivisor = 100;      // → spent / 100 = points
+  static const double pointValueTaka = 0.5;      // 1 pt = ৳0.5 off
+  static const int minPointsRedemption = 1;      // any positive amount
+  static const double commissionRate = 0.10;     // 10% flat
+
+  // Pure helpers — used by UI and ledger code alike.
+  static int computePointsForAmount(int amountTaka) =>
+      amountTaka <= 0 ? 0 : amountTaka ~/ pointsTakaDivisor;
+
+  static int computeCommissionForAmount(int amountTaka) =>
+      amountTaka <= 0 ? 0 : (amountTaka * commissionRate).round();
+
+  static int computeDiscountForPoints(int points) =>
+      points <= 0 ? 0 : (points * pointValueTaka).round();
+
+  /// Strip the dollar/taka prefix and any thousands separators from the legacy
+  /// agreedPrice string and round to whole taka. "$500" / "৳1,500" / "500/hr"
+  /// all collapse to 500. Bad input → 0.
+  static int _parseAgreedAmountTaka(String raw) {
+    if (raw.isEmpty) return 0;
+    final cleaned = raw.replaceAll(RegExp(r'[^0-9.]'), '');
+    final v = double.tryParse(cleaned);
+    if (v == null || v <= 0) return 0;
+    return v.round();
+  }
 
   // ──────────────────────────────────────────────────────────────────────────
   // USER OPERATIONS
@@ -662,6 +693,7 @@ class DatabaseService {
     String description = '',
     String status = 'pending',
     String specialty = '',
+    int pointsToRedeem = 0,
   }) async {
     try {
       final bookingRef = _firestore.collection(bookingsCollection).doc();
@@ -698,11 +730,22 @@ class DatabaseService {
       }
       final categoryKey = _canonicalCategory(resolvedSpecialty);
 
-      await bookingRef.set({
+      // Parse the legacy agreedPrice string into an integer-taka snapshot we
+      // can do math on later. Both fields are persisted: the string for
+      // back-compat with existing readers, the int for the ledger.
+      final agreedAmountTaka = _parseAgreedAmountTaka(agreedPrice);
+      final discountTaka = computeDiscountForPoints(pointsToRedeem);
+
+      final baseBooking = <String, dynamic>{
         'requestId': requestId,
         'clientId': clientId,
         'providerId': providerId,
         'agreedPrice': agreedPrice,
+        'agreedAmountTaka': agreedAmountTaka,
+        'pointsRedeemed': pointsToRedeem,
+        'discountTaka': discountTaka,
+        'pointsRecorded': false,
+        'commissionRecorded': false,
         'description': description,
         'status': status,
         'specialty': resolvedSpecialty,
@@ -711,7 +754,70 @@ class DatabaseService {
         'categoryKey': categoryKey,
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
-      });
+      };
+
+      if (pointsToRedeem > 0) {
+        // Defensive validation inside the transaction. The UI also validates
+        // before calling, but balance can change between sheet open and
+        // submit, so we re-check against the live document here.
+        if (pointsToRedeem < minPointsRedemption) {
+          throw Exception(
+            'Minimum redemption is $minPointsRedemption points',
+          );
+        }
+        if (discountTaka > agreedAmountTaka) {
+          throw Exception(
+            'Discount cannot exceed the agreed amount',
+          );
+        }
+
+        final clientUserRef =
+            _firestore.collection(usersCollection).doc(clientId);
+        final clientRoleRef =
+            _firestore.collection(clientsCollection).doc(clientId);
+        final txnRef =
+            _firestore.collection(transactionsCollection).doc();
+
+        await _firestore.runTransaction((tx) async {
+          final clientSnap = await tx.get(clientUserRef);
+          final currentBalance =
+              _toInt(clientSnap.data()?['pointsBalance']);
+          if (pointsToRedeem > currentBalance) {
+            throw Exception(
+              'Not enough points (have $currentBalance, need $pointsToRedeem)',
+            );
+          }
+          final lifetimeRedeemed =
+              _toInt(clientSnap.data()?['pointsLifetimeRedeemed']);
+
+          tx.set(bookingRef, baseBooking);
+
+          tx.set(txnRef, {
+            'userId': clientId,
+            'userRole': 'client',
+            'type': 'points_redeemed',
+            'amount': pointsToRedeem,
+            'currency': 'POINTS',
+            'bookingId': bookingRef.id,
+            'description':
+                'Redeemed $pointsToRedeem pts (৳$discountTaka off)',
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+
+          tx.set(clientUserRef, {
+            'pointsBalance': currentBalance - pointsToRedeem,
+            'pointsLifetimeRedeemed': lifetimeRedeemed + pointsToRedeem,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+          tx.set(clientRoleRef, {
+            'pointsBalance': currentBalance - pointsToRedeem,
+            'pointsLifetimeRedeemed': lifetimeRedeemed + pointsToRedeem,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        });
+      } else {
+        await bookingRef.set(baseBooking);
+      }
 
       if (requestId.isNotEmpty) {
         await _firestore.collection(requestsCollection).doc(requestId).update({
@@ -1025,6 +1131,7 @@ class DatabaseService {
     required String reviewText,
   }) async {
     try {
+      final trimmedText = reviewText.trim();
       await _firestore.collection(reviewsCollection).add({
         'bookingId': bookingId,
         'clientId': clientId,
@@ -1042,9 +1149,27 @@ class DatabaseService {
               .update({
                 'reviewed': true,
                 'reviewRating': rating,
+                'reviewHasText': trimmedText.isNotEmpty,
                 'reviewedAt': FieldValue.serverTimestamp(),
               });
         } catch (_) {}
+      }
+
+      // Reward points only when the client gave BOTH stars and a written
+      // review. Stars-only submissions intentionally do not earn points.
+      if (rating > 0 &&
+          trimmedText.isNotEmpty &&
+          bookingId.isNotEmpty &&
+          clientId.isNotEmpty) {
+        try {
+          await _awardPointsForReview(
+            bookingId: bookingId,
+            clientId: clientId,
+          );
+        } catch (_) {
+          // Reward failures must not block the review submission itself —
+          // the review is the user-visible action.
+        }
       }
 
       final reviews = await _firestore
@@ -1814,53 +1939,527 @@ class DatabaseService {
     }
   }
 
-  static Future<void> markBookingPaid({required String bookingId}) async {
+  static Future<void> markBookingPaid({
+    required String bookingId,
+    int paymentTimePointsToRedeem = 0,
+  }) async {
     try {
-      await _firestore.collection(bookingsCollection).doc(bookingId).update({
-        'paid': true,
-        'status': 'completed',
-        'paidAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
+      final bookingRef =
+          _firestore.collection(bookingsCollection).doc(bookingId);
+
+      // Single transaction: read booking, no-op if already recorded, otherwise
+      // write the commission ledger entry + booking flags + client/provider
+      // lifetime counters. Belt-and-suspenders idempotency: in-doc flag +
+      // (in the ledger query that admin/UI use) bookingId+type uniqueness.
+      String providerId = '';
+      String clientId = '';
+      String requestId = '';
+      int paidAmountTaka = 0;
+      int pointsEarnedByClient = 0;
+      int commissionAmount = 0;
+      int providerNetTaka = 0;
+      bool wasAlreadyRecorded = false;
+
+      await _firestore.runTransaction((tx) async {
+        // ── PHASE 1: ALL READS ────────────────────────────────────────
+        // Firestore transactions require every read to happen before any
+        // write. We read booking + provider + (optionally) client docs
+        // up front, compute all amounts, then issue every write.
+        final snap = await tx.get(bookingRef);
+        final data = snap.data() ?? {};
+
+        // Use commissionRecorded as the payment-side idempotency flag.
+        // Points earning is now gated on a qualifying review (rating +
+        // text), so it's tracked separately via pointsRecorded.
+        if (data['commissionRecorded'] == true) {
+          wasAlreadyRecorded = true;
+          return;
+        }
+
+        providerId = (data['providerId'] ?? '').toString();
+        clientId = (data['clientId'] ?? '').toString();
+        requestId = (data['requestId'] ?? '').toString();
+
+        // The hourly rate captured at booking creation (used for the
+        // redemption-cap check). Fallback to the legacy string field for
+        // bookings created before this feature shipped.
+        final agreedHourlyRateTaka = data['agreedAmountTaka'] is num
+            ? (data['agreedAmountTaka'] as num).toInt()
+            : _parseAgreedAmountTaka(
+                (data['agreedPrice'] ?? '').toString(),
+              );
+        // The actual bill = hours × rate, written by submitHoursWorked.
+        // This is what the client pays and what commission applies to.
+        // Falls back to the hourly rate for bookings without hours data.
+        final billedAmountTaka = _toInt(data['totalAmount']) > 0
+            ? _toInt(data['totalAmount'])
+            : agreedHourlyRateTaka;
+
+        // Existing booking-time redemption (set in createBooking).
+        final bookingTimePointsRedeemed = _toInt(data['pointsRedeemed']);
+        final bookingTimeDiscount = _toInt(data['discountTaka']) > 0
+            ? _toInt(data['discountTaka'])
+            : computeDiscountForPoints(bookingTimePointsRedeemed);
+
+        // Payment-time redemption (NEW). Validate against the live
+        // balance and the remaining bill, then add on top of any
+        // booking-time redemption.
+        int paymentDiscount = 0;
+        int finalPointsRedeemed = bookingTimePointsRedeemed;
+        DocumentReference<Map<String, dynamic>>? redeemClientUserRef;
+        DocumentReference<Map<String, dynamic>>? redeemClientRoleRef;
+        int currentRedeemBalance = 0;
+        int currentRedeemLifetime = 0;
+        if (paymentTimePointsToRedeem > 0) {
+          if (paymentTimePointsToRedeem < minPointsRedemption) {
+            throw Exception(
+              'Minimum redemption is $minPointsRedemption points',
+            );
+          }
+          if (clientId.isEmpty) {
+            throw Exception('Booking has no client to redeem against');
+          }
+          redeemClientUserRef =
+              _firestore.collection(usersCollection).doc(clientId);
+          redeemClientRoleRef =
+              _firestore.collection(clientsCollection).doc(clientId);
+          final clientSnap = await tx.get(redeemClientUserRef);
+          currentRedeemBalance =
+              _toInt(clientSnap.data()?['pointsBalance']);
+          currentRedeemLifetime =
+              _toInt(clientSnap.data()?['pointsLifetimeRedeemed']);
+          if (paymentTimePointsToRedeem > currentRedeemBalance) {
+            throw Exception(
+              'Not enough points (have $currentRedeemBalance, need $paymentTimePointsToRedeem)',
+            );
+          }
+          paymentDiscount =
+              computeDiscountForPoints(paymentTimePointsToRedeem);
+          // Combined discount can't exceed the bill.
+          if (bookingTimeDiscount + paymentDiscount > billedAmountTaka) {
+            throw Exception(
+              'Discount cannot exceed the bill amount',
+            );
+          }
+          finalPointsRedeemed =
+              bookingTimePointsRedeemed + paymentTimePointsToRedeem;
+        }
+
+        final totalDiscountTaka = bookingTimeDiscount + paymentDiscount;
+
+        paidAmountTaka =
+            (billedAmountTaka - totalDiscountTaka).clamp(0, billedAmountTaka);
+        // Pending points the client *will* earn IF they leave a
+        // qualifying review (stars + written review). Snapshotted here so
+        // the review-time awarding code has a stable amount to credit.
+        pointsEarnedByClient = computePointsForAmount(paidAmountTaka);
+        // Commission is applied ONCE on the full billed amount. The
+        // platform absorbs any points discount.
+        commissionAmount = computeCommissionForAmount(billedAmountTaka);
+        providerNetTaka = billedAmountTaka - commissionAmount;
+
+        DocumentReference<Map<String, dynamic>>? providerUserRef;
+        DocumentReference<Map<String, dynamic>>? providerRoleRef;
+        int currentLifetimeNet = 0;
+        int currentLifetimeCommission = 0;
+        double currentLegacyGross = 0;
+        int currentProviderJobs = 0;
+        if (providerId.isNotEmpty) {
+          providerUserRef =
+              _firestore.collection(usersCollection).doc(providerId);
+          providerRoleRef =
+              _firestore.collection(providersCollection).doc(providerId);
+          final providerSnap = await tx.get(providerRoleRef);
+          final pData = providerSnap.data() ?? {};
+          currentLifetimeNet = _toInt(pData['lifetimeEarningsTaka']);
+          currentLifetimeCommission =
+              _toInt(pData['lifetimeCommissionPaidTaka']);
+          currentLegacyGross = _toDouble(pData['totalEarnings']);
+          currentProviderJobs =
+              _toInt(pData['jobsCompleted'] ?? pData['jobs']);
+        }
+
+        // ── PHASE 2: ALL WRITES ───────────────────────────────────────
+        tx.update(bookingRef, {
+          'paid': true,
+          'status': 'completed',
+          'paidAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+          // Overwrite agreedAmountTaka with the FINAL billed amount so the
+          // earnings UI shows the full job total (not the per-hour rate).
+          'agreedAmountTaka': billedAmountTaka,
+          'agreedHourlyRateTaka': agreedHourlyRateTaka,
+          'billedAmountTaka': billedAmountTaka,
+          'paidAmountTaka': paidAmountTaka,
+          // Cumulative redemption: booking-time + payment-time.
+          'pointsRedeemed': finalPointsRedeemed,
+          'discountTaka': totalDiscountTaka,
+          'paymentTimePointsRedeemed': paymentTimePointsToRedeem,
+          'commissionAmount': commissionAmount,
+          'commissionRate': commissionRate,
+          'providerNetTaka': providerNetTaka,
+          // Pending — credited when the client posts a qualifying review.
+          'pointsEarnedByClient': pointsEarnedByClient,
+          'pointsRecorded': false,
+          'commissionRecorded': true,
+        });
+
+        // Ledger entry: platform charges commission against the provider.
+        if (providerId.isNotEmpty && commissionAmount > 0) {
+          final commRef =
+              _firestore.collection(transactionsCollection).doc();
+          tx.set(commRef, {
+            'userId': providerId,
+            'userRole': 'provider',
+            'type': 'commission_charged',
+            'amount': commissionAmount,
+            'currency': 'BDT',
+            'bookingId': bookingId,
+            'description':
+                '10% commission on ৳$billedAmountTaka (net ৳$providerNetTaka)',
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        }
+
+        // Payment-time redemption: write ledger entry + decrement balance.
+        if (paymentTimePointsToRedeem > 0 &&
+            redeemClientUserRef != null &&
+            redeemClientRoleRef != null) {
+          final redeemRef =
+              _firestore.collection(transactionsCollection).doc();
+          tx.set(redeemRef, {
+            'userId': clientId,
+            'userRole': 'client',
+            'type': 'points_redeemed',
+            'amount': paymentTimePointsToRedeem,
+            'currency': 'POINTS',
+            'bookingId': bookingId,
+            'description':
+                'Redeemed $paymentTimePointsToRedeem pts at payment (৳$paymentDiscount off)',
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+          final clientUpdate = {
+            'pointsBalance':
+                currentRedeemBalance - paymentTimePointsToRedeem,
+            'pointsLifetimeRedeemed':
+                currentRedeemLifetime + paymentTimePointsToRedeem,
+            'updatedAt': FieldValue.serverTimestamp(),
+          };
+          tx.set(redeemClientUserRef, clientUpdate, SetOptions(merge: true));
+          tx.set(redeemClientRoleRef, clientUpdate, SetOptions(merge: true));
+        }
+
+        // Update provider lifetime counters + keep the legacy gross
+        // totalEarnings / jobsCompleted fields rolling for back-compat.
+        if (providerUserRef != null && providerRoleRef != null) {
+          final providerUpdate = {
+            'lifetimeEarningsTaka':
+                currentLifetimeNet + providerNetTaka,
+            'lifetimeCommissionPaidTaka':
+                currentLifetimeCommission + commissionAmount,
+            'totalEarnings':
+                currentLegacyGross + paidAmountTaka.toDouble(),
+            'jobsCompleted': currentProviderJobs + 1,
+            'jobs': currentProviderJobs + 1,
+            'totalJobs': currentProviderJobs + 1,
+            'updatedAt': FieldValue.serverTimestamp(),
+          };
+          tx.set(providerRoleRef, providerUpdate, SetOptions(merge: true));
+          tx.set(providerUserRef, providerUpdate, SetOptions(merge: true));
+        }
       });
 
-      final bookingDoc = await _firestore
-          .collection(bookingsCollection)
-          .doc(bookingId)
-          .get();
-      final data = bookingDoc.data() ?? {};
-      final providerId = (data['providerId'] ?? '').toString();
-      final requestId = (data['requestId'] ?? '').toString();
-      final total = _toDouble(data['totalAmount']);
+      if (wasAlreadyRecorded) return;
 
+      // Mirror status onto the originating service request (outside the
+      // transaction — non-critical for ledger correctness).
       if (requestId.isNotEmpty) {
         await _firestore.collection(requestsCollection).doc(requestId).update({
           'status': 'completed',
           'updatedAt': FieldValue.serverTimestamp(),
         });
       }
-
-      if (providerId.isNotEmpty) {
-        final providerRef = _firestore
-            .collection(providersCollection)
-            .doc(providerId);
-        await _firestore.runTransaction((tx) async {
-          final snap = await tx.get(providerRef);
-          final existing = _toDouble(snap.data()?['totalEarnings']);
-          final jobs = _toInt(
-            snap.data()?['jobsCompleted'] ?? snap.data()?['jobs'],
-          );
-          tx.set(providerRef, {
-            'totalEarnings': existing + total,
-            'jobsCompleted': jobs + 1,
-            'jobs': jobs + 1,
-            'totalJobs': jobs + 1,
-            'updatedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-        });
-      }
     } catch (e) {
       throw Exception('Failed to mark booking paid: $e');
     }
+  }
+
+  /// Idempotent: writes a `points_earned` ledger entry and bumps the
+  /// client's points balance + lifetime-earned counter ONCE for the given
+  /// booking. Triggered from createReview when the client posts a
+  /// qualifying review (rating + non-empty text). Skipped if the booking
+  /// hasn't been paid, or points have already been recorded.
+  static Future<void> _awardPointsForReview({
+    required String bookingId,
+    required String clientId,
+  }) async {
+    final bookingRef =
+        _firestore.collection(bookingsCollection).doc(bookingId);
+    final clientUserRef =
+        _firestore.collection(usersCollection).doc(clientId);
+    final clientRoleRef =
+        _firestore.collection(clientsCollection).doc(clientId);
+    final ledgerRef = _firestore.collection(transactionsCollection).doc();
+
+    await _firestore.runTransaction((tx) async {
+      // ── PHASE 1: ALL READS ──────────────────────────────────────────
+      final bookingSnap = await tx.get(bookingRef);
+      final bookingData = bookingSnap.data();
+      if (bookingData == null) return;
+      if (bookingData['paid'] != true) return;
+      if (bookingData['pointsRecorded'] == true) return;
+
+      final pointsToAward = _toInt(bookingData['pointsEarnedByClient']);
+      final paidAmountTaka = _toInt(bookingData['paidAmountTaka']);
+
+      // No reward to issue (e.g. paid amount < 100 taka) — still flip the
+      // flag so we don't keep re-checking on subsequent review edits.
+      if (pointsToAward <= 0) {
+        tx.update(bookingRef, {
+          'pointsRecorded': true,
+          'pointsAwardedAt': FieldValue.serverTimestamp(),
+        });
+        return;
+      }
+
+      final clientSnap = await tx.get(clientUserRef);
+      final balance = _toInt(clientSnap.data()?['pointsBalance']);
+      final lifetimeEarned =
+          _toInt(clientSnap.data()?['pointsLifetimeEarned']);
+
+      // ── PHASE 2: ALL WRITES ─────────────────────────────────────────
+      tx.set(ledgerRef, {
+        'userId': clientId,
+        'userRole': 'client',
+        'type': 'points_earned',
+        'amount': pointsToAward,
+        'currency': 'POINTS',
+        'bookingId': bookingId,
+        'description':
+            'Earned $pointsToAward pts for reviewing ৳$paidAmountTaka job',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      final clientUpdate = {
+        'pointsBalance': balance + pointsToAward,
+        'pointsLifetimeEarned': lifetimeEarned + pointsToAward,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      tx.set(clientUserRef, clientUpdate, SetOptions(merge: true));
+      tx.set(clientRoleRef, clientUpdate, SetOptions(merge: true));
+
+      tx.update(bookingRef, {
+        'pointsRecorded': true,
+        'pointsAwardedAt': FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  /// How many points the client *will* earn when they post a qualifying
+  /// review for this booking. Returns 0 if already credited or unpaid.
+  static Future<int> getPendingReviewPoints(String bookingId) async {
+    if (bookingId.isEmpty) return 0;
+    try {
+      final doc = await _firestore
+          .collection(bookingsCollection)
+          .doc(bookingId)
+          .get();
+      final data = doc.data();
+      if (data == null) return 0;
+      if (data['paid'] != true) return 0;
+      if (data['pointsRecorded'] == true) return 0;
+      return _toInt(data['pointsEarnedByClient']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // POINTS / COMMISSION READ HELPERS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  static Future<int> getPointsBalance(String userId) async {
+    if (userId.isEmpty) return 0;
+    try {
+      final doc =
+          await _firestore.collection(usersCollection).doc(userId).get();
+      return _toInt(doc.data()?['pointsBalance']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static Future<Map<String, int>> getPointsSummary(String userId) async {
+    if (userId.isEmpty) {
+      return {'balance': 0, 'lifetimeEarned': 0, 'lifetimeRedeemed': 0};
+    }
+    try {
+      final doc =
+          await _firestore.collection(usersCollection).doc(userId).get();
+      final data = doc.data() ?? {};
+      return {
+        'balance': _toInt(data['pointsBalance']),
+        'lifetimeEarned': _toInt(data['pointsLifetimeEarned']),
+        'lifetimeRedeemed': _toInt(data['pointsLifetimeRedeemed']),
+      };
+    } catch (_) {
+      return {'balance': 0, 'lifetimeEarned': 0, 'lifetimeRedeemed': 0};
+    }
+  }
+
+  /// Client-facing points history (earned + redeemed). Newest first.
+  static Future<List<Map<String, dynamic>>> getPointsHistory(
+    String userId, {
+    int limit = 50,
+  }) async {
+    if (userId.isEmpty) return const [];
+    try {
+      // Fetch without orderBy to dodge composite-index requirements; sort
+      // client-side. This collection is per-user and small in practice.
+      final snap = await _firestore
+          .collection(transactionsCollection)
+          .where('userId', isEqualTo: userId)
+          .where('type', whereIn: ['points_earned', 'points_redeemed'])
+          .limit(limit * 2)
+          .get();
+      final items = snap.docs
+          .map((d) => {'id': d.id, ...d.data()})
+          .toList();
+      items.sort((a, b) {
+        final ta = a['createdAt'];
+        final tb = b['createdAt'];
+        final ma = ta is Timestamp ? ta.millisecondsSinceEpoch : 0;
+        final mb = tb is Timestamp ? tb.millisecondsSinceEpoch : 0;
+        return mb.compareTo(ma);
+      });
+      return items.take(limit).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Provider-facing earnings history. Returns commission_charged ledger
+  /// entries enriched with the booking's gross/net snapshot.
+  static Future<List<Map<String, dynamic>>> getProviderEarningsHistory(
+    String providerId, {
+    int limit = 50,
+  }) async {
+    if (providerId.isEmpty) return const [];
+    try {
+      final snap = await _firestore
+          .collection(transactionsCollection)
+          .where('userId', isEqualTo: providerId)
+          .where('type', isEqualTo: 'commission_charged')
+          .limit(limit * 2)
+          .get();
+      final entries = snap.docs
+          .map((d) => {'id': d.id, ...d.data()})
+          .toList();
+      entries.sort((a, b) {
+        final ta = a['createdAt'];
+        final tb = b['createdAt'];
+        final ma = ta is Timestamp ? ta.millisecondsSinceEpoch : 0;
+        final mb = tb is Timestamp ? tb.millisecondsSinceEpoch : 0;
+        return mb.compareTo(ma);
+      });
+      // Hydrate with booking gross/net for the UI.
+      final out = <Map<String, dynamic>>[];
+      for (final e in entries.take(limit)) {
+        final bookingId = (e['bookingId'] ?? '').toString();
+        Map<String, dynamic>? booking;
+        if (bookingId.isNotEmpty) {
+          try {
+            final b = await _firestore
+                .collection(bookingsCollection)
+                .doc(bookingId)
+                .get();
+            booking = b.data();
+          } catch (_) {}
+        }
+        out.add({
+          ...e,
+          'agreedAmountTaka':
+              _toInt(booking?['agreedAmountTaka']),
+          'providerNetTaka': _toInt(booking?['providerNetTaka']),
+          'clientId': (booking?['clientId'] ?? '').toString(),
+          'specialty':
+              (booking?['specialty'] ?? booking?['serviceType'] ?? '')
+                  .toString(),
+        });
+      }
+      return out;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Admin-side query: list ledger entries with optional filters. Sort
+  /// newest-first client-side to avoid composite-index requirements.
+  static Future<List<Map<String, dynamic>>> getTransactions({
+    String? type,
+    DateTime? since,
+    DateTime? until,
+    int limit = 200,
+  }) async {
+    try {
+      Query<Map<String, dynamic>> q =
+          _firestore.collection(transactionsCollection);
+      if (type != null && type.isNotEmpty) {
+        q = q.where('type', isEqualTo: type);
+      }
+      final snap = await q.limit(limit * 2).get();
+      var items = snap.docs
+          .map((d) => {'id': d.id, ...d.data()})
+          .where((it) {
+        final ts = it['createdAt'];
+        if (ts is! Timestamp) return true;
+        final dt = ts.toDate();
+        if (since != null && dt.isBefore(since)) return false;
+        if (until != null && dt.isAfter(until)) return false;
+        return true;
+      }).toList();
+      items.sort((a, b) {
+        final ta = a['createdAt'];
+        final tb = b['createdAt'];
+        final ma = ta is Timestamp ? ta.millisecondsSinceEpoch : 0;
+        final mb = tb is Timestamp ? tb.millisecondsSinceEpoch : 0;
+        return mb.compareTo(ma);
+      });
+      return items.take(limit).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Validate a redemption attempt before submitting a booking. Returns a
+  /// record with `ok` true/false and a human-readable error.
+  static Future<({bool ok, String? error})> validatePointsRedemption({
+    required String userId,
+    required int pointsToRedeem,
+    required int agreedAmountTaka,
+  }) async {
+    if (pointsToRedeem == 0) return (ok: true, error: null);
+    if (pointsToRedeem < minPointsRedemption) {
+      return (
+        ok: false,
+        error: 'Minimum redemption is $minPointsRedemption points',
+      );
+    }
+    final balance = await getPointsBalance(userId);
+    if (pointsToRedeem > balance) {
+      return (
+        ok: false,
+        error: 'You only have $balance points',
+      );
+    }
+    final discount = computeDiscountForPoints(pointsToRedeem);
+    if (discount > agreedAmountTaka) {
+      return (
+        ok: false,
+        error: 'Discount cannot exceed the agreed amount',
+      );
+    }
+    return (ok: true, error: null);
   }
 
   static String _canonicalCategory(String raw) {
@@ -2018,10 +2617,12 @@ class DatabaseService {
     final results = await Future.wait([
       _firestore.collection(bookingsCollection).get(),
       _firestore.collection(usersCollection).get(),
+      _firestore.collection(transactionsCollection).get(),
     ]);
 
     final bookingsSnap = results[0];
     final usersSnap = results[1];
+    final transactionsSnap = results[2];
 
     final Map<String, Map<String, dynamic>> userMap = {};
     for (final doc in usersSnap.docs) {
@@ -2172,12 +2773,59 @@ class DatabaseService {
       forecastNextMonth = (nonZero.last['amount'] as double);
     }
 
+    // Ledger aggregates — drives the new commission/points panels on the
+    // admin revenue screen without touching the existing keys above.
+    int totalCommissionTaka = 0;
+    int totalPointsIssued = 0;
+    int totalPointsRedeemed = 0;
+    final Map<String, int> commissionByMonth = {};
+    for (int i = 5; i >= 0; i--) {
+      final m = DateTime(now.year, now.month - i, 1);
+      final key = '${m.year}-${m.month.toString().padLeft(2, '0')}';
+      commissionByMonth[key] = 0;
+    }
+
+    for (final doc in transactionsSnap.docs) {
+      final data = doc.data();
+      final type = (data['type'] ?? '').toString();
+      final amount = _toInt(data['amount']);
+      final ts = data['createdAt'];
+      switch (type) {
+        case 'commission_charged':
+          totalCommissionTaka += amount;
+          if (ts is Timestamp) {
+            final dt = ts.toDate();
+            final key =
+                '${dt.year}-${dt.month.toString().padLeft(2, '0')}';
+            if (commissionByMonth.containsKey(key)) {
+              commissionByMonth[key] =
+                  (commissionByMonth[key] ?? 0) + amount;
+            }
+          }
+          break;
+        case 'points_earned':
+          totalPointsIssued += amount;
+          break;
+        case 'points_redeemed':
+          totalPointsRedeemed += amount;
+          break;
+      }
+    }
+
+    final platformNetTaka = totalCommissionTaka -
+        (totalPointsRedeemed * pointValueTaka).round();
+
     return {
       'totalRevenue': totalRevenue,
       'forecastNextMonth': forecastNextMonth,
       'forecastGrowthPct': forecastGrowthPct,
       'userEarnings': userEarnings,
       'monthlyRevenue': monthlyRevenue,
+      'totalCommissionTaka': totalCommissionTaka,
+      'totalPointsIssued': totalPointsIssued,
+      'totalPointsRedeemed': totalPointsRedeemed,
+      'platformNetTaka': platformNetTaka,
+      'commissionByMonth': commissionByMonth,
     };
   }
 

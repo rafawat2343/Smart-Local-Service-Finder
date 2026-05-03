@@ -27,6 +27,13 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Google Maps SDK key. Replace YOUR_GOOGLE_MAPS_API_KEY with the
+             API key from your Google Cloud project (Maps SDK for Android
+             must be enabled). The map widget will render gray until this
+             is set. -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="YOUR_GOOGLE_MAPS_API_KEY" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

@@ -1,13 +1,13 @@
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/auth_service.dart';
 import '../../services/database_service.dart';
 import '../../utils/app_colors.dart';
 import '../../utils/theme_notifier.dart';
 import '../../widgets/shared_widgets.dart';
+import '../shared/location_picker_screen.dart';
 import '../shared/user_type_screen.dart';
 
 class ProviderProfileScreen extends StatefulWidget {
@@ -171,6 +171,9 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
     // Service Area state
     double? sheetLat = (_profileData?['latitude'] as num?)?.toDouble();
     double? sheetLng = (_profileData?['longitude'] as num?)?.toDouble();
+    String sheetAddress =
+        (_profileData?['location'] ?? _profileData?['address'] ?? '')
+            .toString();
     int sheetRadius = (_profileData?['serviceRadiusKm'] as int?) ?? 5;
     bool sheetFetchingLoc = false;
     String locUpdatedAt = 'Never updated';
@@ -468,30 +471,19 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                             ? null
                             : () async {
                                 setSheetState(() => sheetFetchingLoc = true);
-                                try {
-                                  LocationPermission perm =
-                                      await Geolocator.checkPermission();
-                                  if (perm == LocationPermission.denied) {
-                                    perm =
-                                        await Geolocator.requestPermission();
-                                  }
-                                  if (perm == LocationPermission.whileInUse ||
-                                      perm == LocationPermission.always) {
-                                    final pos =
-                                        await Geolocator.getCurrentPosition(
-                                      desiredAccuracy: LocationAccuracy.medium,
-                                    );
-                                    setSheetState(() {
-                                      sheetLat = pos.latitude;
-                                      sheetLng = pos.longitude;
-                                      sheetFetchingLoc = false;
-                                    });
-                                  } else {
-                                    setSheetState(
-                                      () => sheetFetchingLoc = false,
-                                    );
-                                  }
-                                } catch (_) {
+                                final picked = await LocationPickerScreen.pick(
+                                  context,
+                                  initialLatitude: sheetLat,
+                                  initialLongitude: sheetLng,
+                                );
+                                if (picked != null) {
+                                  setSheetState(() {
+                                    sheetLat = picked.latitude;
+                                    sheetLng = picked.longitude;
+                                    sheetAddress = picked.address;
+                                    sheetFetchingLoc = false;
+                                  });
+                                } else {
                                   setSheetState(
                                     () => sheetFetchingLoc = false,
                                   );
@@ -512,7 +504,7 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                               Icon(
                                 sheetLat != null
                                     ? Icons.location_on_rounded
-                                    : Icons.location_off_outlined,
+                                    : Icons.map_rounded,
                                 size: 18,
                                 color: sheetLat != null
                                     ? AppColors.accent
@@ -522,12 +514,14 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                               Expanded(
                                 child: Text(
                                   sheetFetchingLoc
-                                      ? 'Getting location...'
-                                      : sheetLat != null
-                                      ? 'Location set  '
-                                          '(${sheetLat!.toStringAsFixed(4)}, '
-                                          '${sheetLng!.toStringAsFixed(4)})'
-                                      : 'Tap to update my location',
+                                      ? 'Opening map...'
+                                      : sheetAddress.isNotEmpty
+                                          ? sheetAddress
+                                          : sheetLat != null
+                                              ? 'Location set'
+                                              : 'Tap to pick on map',
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     fontSize: 13,
                                     color: sheetLat != null
@@ -637,6 +631,10 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                                 profileUpdates['locationUpdatedAt'] =
                                     FieldValue.serverTimestamp();
                               }
+                              if (sheetAddress.isNotEmpty) {
+                                profileUpdates['location'] = sheetAddress;
+                                profileUpdates['address'] = sheetAddress;
+                              }
                               await DatabaseService.updateProviderProfile(
                                 userId: userId,
                                 updates: profileUpdates,
@@ -671,6 +669,10 @@ class _ProviderProfileScreenState extends State<ProviderProfileScreen>
                                   'serviceRadiusKm': sheetRadius,
                                   if (sheetLat != null) 'latitude': sheetLat!,
                                   if (sheetLng != null) 'longitude': sheetLng!,
+                                  if (sheetAddress.isNotEmpty)
+                                    'location': sheetAddress,
+                                  if (sheetAddress.isNotEmpty)
+                                    'address': sheetAddress,
                                 };
                               });
                               // Reload from server to confirm

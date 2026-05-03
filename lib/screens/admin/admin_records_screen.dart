@@ -17,17 +17,23 @@ class _AdminRecordsScreenState extends State<AdminRecordsScreen>
   late TabController _tabController;
   List<Map<String, dynamic>> _requests = [];
   List<Map<String, dynamic>> _bookings = [];
+  List<Map<String, dynamic>> _ledger = [];
   bool _loadingRequests = true;
   bool _loadingBookings = true;
+  bool _loadingLedger = true;
   String _requestFilter = 'all';
   String _bookingFilter = 'all';
+  String _ledgerFilter = 'all';
+  DateTimeRange? _ledgerRange;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this, initialIndex: widget.initialTab);
+    _tabController =
+        TabController(length: 3, vsync: this, initialIndex: widget.initialTab);
     _loadRequests();
     _loadBookings();
+    _loadLedger();
   }
 
   @override
@@ -65,6 +71,26 @@ class _AdminRecordsScreenState extends State<AdminRecordsScreen>
       }
     } finally {
       if (mounted) setState(() => _loadingBookings = false);
+    }
+  }
+
+  Future<void> _loadLedger() async {
+    setState(() => _loadingLedger = true);
+    try {
+      final data = await DatabaseService.getTransactions(
+        type: _ledgerFilter == 'all' ? null : _ledgerFilter,
+        since: _ledgerRange?.start,
+        until: _ledgerRange?.end,
+      );
+      if (mounted) setState(() => _ledger = data);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load ledger: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loadingLedger = false);
     }
   }
 
@@ -118,6 +144,7 @@ class _AdminRecordsScreenState extends State<AdminRecordsScreen>
                 fontSize: 13,
                 fontWeight: FontWeight.w700,
               ),
+              isScrollable: true,
               tabs: [
                 Tab(
                   child: Row(
@@ -139,6 +166,16 @@ class _AdminRecordsScreenState extends State<AdminRecordsScreen>
                     ],
                   ),
                 ),
+                Tab(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.receipt_long_rounded, size: 16),
+                      const SizedBox(width: 6),
+                      Text('Ledger (${_ledger.length})'),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
@@ -148,6 +185,7 @@ class _AdminRecordsScreenState extends State<AdminRecordsScreen>
               children: [
                 _buildRequestsTab(),
                 _buildBookingsTab(),
+                _buildLedgerTab(),
               ],
             ),
           ),
@@ -294,6 +332,193 @@ class _AdminRecordsScreenState extends State<AdminRecordsScreen>
       ],
     );
   }
+
+  Widget _buildLedgerTab() {
+    if (_loadingLedger) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    const ledgerTypes = [
+      ('all', 'All'),
+      ('points_earned', 'Points earned'),
+      ('points_redeemed', 'Points redeemed'),
+      ('commission_charged', 'Commission'),
+    ];
+
+    int totalCommission = 0;
+    int totalPointsEarned = 0;
+    int totalPointsRedeemed = 0;
+    for (final t in _ledger) {
+      final amt = (t['amount'] is num) ? (t['amount'] as num).toInt() : 0;
+      switch ((t['type'] ?? '').toString()) {
+        case 'commission_charged':
+          totalCommission += amt;
+          break;
+        case 'points_earned':
+          totalPointsEarned += amt;
+          break;
+        case 'points_redeemed':
+          totalPointsRedeemed += amt;
+          break;
+      }
+    }
+
+    return Column(
+      children: [
+        Container(
+          height: 44,
+          color: AppColors.surface,
+          child: Row(
+            children: [
+              Expanded(
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  itemCount: ledgerTypes.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (_, i) {
+                    final t = ledgerTypes[i];
+                    final isSelected = _ledgerFilter == t.$1;
+                    return GestureDetector(
+                      onTap: () {
+                        setState(() => _ledgerFilter = t.$1);
+                        _loadLedger();
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? const Color(0xFF1A7A4A)
+                              : AppColors.background,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: isSelected
+                                ? const Color(0xFF1A7A4A)
+                                : AppColors.border,
+                          ),
+                        ),
+                        child: Text(
+                          t.$2,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: isSelected
+                                ? Colors.white
+                                : AppColors.textSecondary,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              IconButton(
+                tooltip: 'Date range',
+                icon: Icon(
+                  Icons.event_rounded,
+                  size: 18,
+                  color: _ledgerRange == null
+                      ? AppColors.textSecondary
+                      : const Color(0xFF1A7A4A),
+                ),
+                onPressed: () async {
+                  final now = DateTime.now();
+                  final picked = await showDateRangePicker(
+                    context: context,
+                    firstDate: DateTime(now.year - 2),
+                    lastDate: now,
+                    initialDateRange: _ledgerRange,
+                  );
+                  if (picked != null) {
+                    setState(() => _ledgerRange = picked);
+                    _loadLedger();
+                  }
+                },
+              ),
+              if (_ledgerRange != null)
+                IconButton(
+                  tooltip: 'Clear range',
+                  icon: const Icon(Icons.close_rounded,
+                      size: 16, color: AppColors.textTertiary),
+                  onPressed: () {
+                    setState(() => _ledgerRange = null);
+                    _loadLedger();
+                  },
+                ),
+            ],
+          ),
+        ),
+        if (_ledgerRange != null)
+          Container(
+            color: AppColors.surface,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Row(
+              children: [
+                const Icon(Icons.event_note_rounded,
+                    size: 12, color: AppColors.textTertiary),
+                const SizedBox(width: 4),
+                Text(
+                  '${_fmtDate(_ledgerRange!.start)} → ${_fmtDate(_ledgerRange!.end)}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: AppColors.textSecondary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        Expanded(
+          child: _ledger.isEmpty
+              ? _buildEmpty('No transactions found')
+              : RefreshIndicator(
+                  onRefresh: _loadLedger,
+                  child: ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 80),
+                    itemCount: _ledger.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (_, i) => _LedgerCard(entry: _ledger[i]),
+                  ),
+                ),
+        ),
+        // Totals footer
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            border: Border(
+              top: BorderSide(color: AppColors.border),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              _LedgerTotal(
+                label: 'Commission',
+                value: '৳$totalCommission',
+                color: const Color(0xFF1A7A4A),
+              ),
+              _LedgerTotal(
+                label: 'Earned',
+                value: '+$totalPointsEarned pts',
+                color: AppColors.star,
+              ),
+              _LedgerTotal(
+                label: 'Redeemed',
+                value: '-$totalPointsRedeemed pts',
+                color: AppColors.urgent,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  static String _fmtDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   Widget _buildStatusFilterBar({
     required List<String> statuses,
@@ -649,6 +874,191 @@ class _StatusBadgeForStatus extends StatelessWidget {
       color: color,
       bgColor: bgColor,
       icon: icon,
+    );
+  }
+}
+
+class _LedgerCard extends StatelessWidget {
+  final Map<String, dynamic> entry;
+  const _LedgerCard({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    final type = (entry['type'] ?? '').toString();
+    final amount =
+        (entry['amount'] is num) ? (entry['amount'] as num).toInt() : 0;
+    final currency = (entry['currency'] ?? '').toString();
+    final desc = (entry['description'] ?? '').toString();
+    final userId = (entry['userId'] ?? '').toString();
+    final userRole = (entry['userRole'] ?? '').toString();
+    final bookingId = (entry['bookingId'] ?? '').toString();
+    final dateStr = _formatTimestamp(entry['createdAt']);
+
+    Color color;
+    Color bg;
+    IconData icon;
+    String prefix;
+    String label;
+    switch (type) {
+      case 'commission_charged':
+        color = const Color(0xFF1A7A4A);
+        bg = const Color(0xFFE8F5EE);
+        icon = Icons.account_balance_rounded;
+        prefix = '৳';
+        label = 'Commission';
+        break;
+      case 'points_earned':
+        color = AppColors.star;
+        bg = AppColors.starBg;
+        icon = Icons.add_circle_outline_rounded;
+        prefix = '+';
+        label = 'Points earned';
+        break;
+      case 'points_redeemed':
+        color = AppColors.urgent;
+        bg = AppColors.urgentBg;
+        icon = Icons.remove_circle_outline_rounded;
+        prefix = '−';
+        label = 'Points redeemed';
+        break;
+      default:
+        color = AppColors.textSecondary;
+        bg = AppColors.background;
+        icon = Icons.receipt_long_rounded;
+        prefix = '';
+        label = type.isEmpty ? 'Transaction' : type;
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, size: 18, color: color),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    if (userRole.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: AppColors.navyLight,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          userRole,
+                          style: const TextStyle(
+                            fontSize: 9,
+                            color: AppColors.navy,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                if (desc.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      desc,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.textSecondary,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                const SizedBox(height: 2),
+                Text(
+                  '$dateStr • user ${userId.isEmpty ? '—' : userId.substring(0, userId.length.clamp(0, 8))}'
+                  '${bookingId.isEmpty ? '' : ' • booking ${bookingId.substring(0, bookingId.length.clamp(0, 6))}'}',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: AppColors.textTertiary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            currency == 'POINTS'
+                ? '$prefix$amount pts'
+                : '$prefix$amount',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+              color: color,
+              letterSpacing: -0.3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LedgerTotal extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color color;
+  const _LedgerTotal({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            color: AppColors.textSecondary,
+            letterSpacing: 0.3,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w900,
+            color: color,
+            letterSpacing: -0.3,
+          ),
+        ),
+      ],
     );
   }
 }

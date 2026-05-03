@@ -981,6 +981,11 @@ class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
     );
     final descController = TextEditingController();
     bool submitting = false;
+    int pointsBalance = 0;
+    bool useRedemption = false;
+    int pointsToRedeem = 0;
+    String? redemptionError;
+    bool balanceFetched = false;
 
     showModalBottomSheet(
       context: context,
@@ -990,6 +995,33 @@ class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
         return StatefulBuilder(
           builder: (ctx, setSt) {
             final viewInsets = MediaQuery.of(ctx).viewInsets.bottom;
+            // Resolve the agreed amount as the slider/discount math depends on
+            // it. Recompute on every rebuild so live edits to the rate field
+            // immediately reflect in the discount math.
+            final agreedAmountTaka = int.tryParse(
+                  priceController.text.replaceAll(RegExp(r'[^0-9]'), ''),
+                ) ??
+                0;
+            final sliderMax = (agreedAmountTaka * 2)
+                .clamp(0, pointsBalance);
+            // Clamp the current selection if it became invalid (e.g. price
+            // dropped below the discount).
+            if (pointsToRedeem > sliderMax) {
+              pointsToRedeem = sliderMax;
+            }
+            final discountTaka =
+                DatabaseService.computeDiscountForPoints(pointsToRedeem);
+            final newTotal = (agreedAmountTaka - discountTaka)
+                .clamp(0, agreedAmountTaka);
+            // Fetch the live balance once when the sheet first builds.
+            if (!balanceFetched) {
+              balanceFetched = true;
+              DatabaseService.getPointsBalance(_clientId).then((b) {
+                if (b != pointsBalance) {
+                  setSt(() => pointsBalance = b);
+                }
+              });
+            }
             return Padding(
               padding: EdgeInsets.only(bottom: viewInsets),
               child: Container(
@@ -1082,6 +1114,121 @@ class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
                       ),
                     ),
                     const SizedBox(height: 6),
+                    if (pointsBalance > 0) ...[
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppColors.starBg,
+                          borderRadius: BorderRadius.circular(10),
+                          border:
+                              Border.all(color: AppColors.star.withOpacity(0.3)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(
+                                  Icons.stars_rounded,
+                                  color: AppColors.star,
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'You have $pointsBalance points',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w800,
+                                      color: AppColors.navy,
+                                    ),
+                                  ),
+                                ),
+                                if (pointsBalance >=
+                                    DatabaseService.minPointsRedemption)
+                                  Switch.adaptive(
+                                    value: useRedemption,
+                                    activeColor: AppColors.accent,
+                                    onChanged: (v) {
+                                      setSt(() {
+                                        useRedemption = v;
+                                        pointsToRedeem = v
+                                            ? DatabaseService
+                                                .minPointsRedemption
+                                                .clamp(0, sliderMax)
+                                            : 0;
+                                        redemptionError = null;
+                                      });
+                                    },
+                                  )
+                                else
+                                  const SizedBox.shrink(),
+                              ],
+                            ),
+                            if (useRedemption && sliderMax >= 1) ...[
+                              const SizedBox(height: 6),
+                              Slider(
+                                value: pointsToRedeem
+                                    .toDouble()
+                                    .clamp(1, sliderMax.toDouble()),
+                                min: 1,
+                                max: sliderMax.toDouble(),
+                                divisions:
+                                    (sliderMax - 1).clamp(1, sliderMax),
+                                activeColor: AppColors.accent,
+                                label: '$pointsToRedeem pts',
+                                onChanged: (v) {
+                                  setSt(() {
+                                    pointsToRedeem = v.round();
+                                    redemptionError = null;
+                                  });
+                                },
+                              ),
+                              Text(
+                                'Use $pointsToRedeem pts → save ৳$discountTaka',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.success,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Total: ৳$agreedAmountTaka  −  ৳$discountTaka  =  ৳$newTotal',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.textPrimary,
+                                ),
+                              ),
+                            ],
+                            if (useRedemption && sliderMax < 1)
+                              const Padding(
+                                padding: EdgeInsets.only(top: 6),
+                                child: Text(
+                                  'Enter a valid rate first',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: AppColors.urgent,
+                                  ),
+                                ),
+                              ),
+                            if (redemptionError != null) ...[
+                              const SizedBox(height: 6),
+                              Text(
+                                redemptionError!,
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.urgent,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                    ],
                     TextField(
                       controller: descController,
                       maxLines: 4,
@@ -1171,6 +1318,20 @@ class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
                                   }
                                   return;
                                 }
+                                if (useRedemption && pointsToRedeem > 0) {
+                                  final v = await DatabaseService
+                                      .validatePointsRedemption(
+                                    userId: clientId,
+                                    pointsToRedeem: pointsToRedeem,
+                                    agreedAmountTaka: agreedAmountTaka,
+                                  );
+                                  if (!v.ok) {
+                                    setSt(() {
+                                      redemptionError = v.error;
+                                    });
+                                    return;
+                                  }
+                                }
                                 setSt(() => submitting = true);
                                 try {
                                   await DatabaseService.createBooking(
@@ -1180,6 +1341,8 @@ class _ProviderDetailScreenState extends State<ProviderDetailScreen> {
                                     agreedPrice: '\$$rate',
                                     description: desc,
                                     specialty: specialty,
+                                    pointsToRedeem:
+                                        useRedemption ? pointsToRedeem : 0,
                                   );
                                   if (ctx.mounted) Navigator.pop(ctx);
                                   if (context.mounted) {

@@ -229,6 +229,14 @@ class _AdminRevenueScreenState extends State<AdminRevenueScreen> {
     );
   }
 
+  static int _readInt(dynamic v) {
+    if (v is num) return v.toInt();
+    if (v is String) {
+      return int.tryParse(v.replaceAll(RegExp(r'[^0-9-]'), '')) ?? 0;
+    }
+    return 0;
+  }
+
   List<Map<String, dynamic>> get _filteredUsers {
     final list =
         ((_data['userEarnings'] ?? []) as List).cast<Map<String, dynamic>>();
@@ -251,6 +259,16 @@ class _AdminRevenueScreenState extends State<AdminRevenueScreen> {
     final monthly = ((_data['monthlyRevenue'] ?? []) as List)
         .cast<Map<String, dynamic>>();
 
+    final totalCommission = _readInt(_data['totalCommissionTaka']);
+    final totalPointsIssued = _readInt(_data['totalPointsIssued']);
+    final totalPointsRedeemed = _readInt(_data['totalPointsRedeemed']);
+    final platformNet = _readInt(_data['platformNetTaka']);
+    final outstandingPoints = totalPointsIssued - totalPointsRedeemed;
+    final pointsLiability = (outstandingPoints * 0.5).round();
+    final commissionByMonth =
+        (_data['commissionByMonth'] as Map<dynamic, dynamic>? ?? {})
+            .map((k, v) => MapEntry(k.toString(), _readInt(v)));
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Column(
@@ -272,6 +290,18 @@ class _AdminRevenueScreenState extends State<AdminRevenueScreen> {
                             totalRevenue: totalRevenue,
                             forecast: forecast,
                             growthPct: growthPct,
+                          ),
+                          const SizedBox(height: 16),
+
+                          // Commission + points panel (new)
+                          _CommissionPanel(
+                            totalCommission: totalCommission,
+                            totalPointsIssued: totalPointsIssued,
+                            totalPointsRedeemed: totalPointsRedeemed,
+                            outstandingPoints: outstandingPoints,
+                            pointsLiability: pointsLiability,
+                            platformNet: platformNet,
+                            commissionByMonth: commissionByMonth,
                           ),
                           const SizedBox(height: 16),
 
@@ -636,6 +666,297 @@ class _SummaryCard extends StatelessWidget {
               overflow: TextOverflow.ellipsis),
         ],
       ),
+    );
+  }
+}
+
+// ── Commission Panel (ledger-driven) ──────────────────────────────────────
+
+class _CommissionPanel extends StatelessWidget {
+  final int totalCommission;
+  final int totalPointsIssued;
+  final int totalPointsRedeemed;
+  final int outstandingPoints;
+  final int pointsLiability;
+  final int platformNet;
+  final Map<String, int> commissionByMonth;
+
+  const _CommissionPanel({
+    required this.totalCommission,
+    required this.totalPointsIssued,
+    required this.totalPointsRedeemed,
+    required this.outstandingPoints,
+    required this.pointsLiability,
+    required this.platformNet,
+    required this.commissionByMonth,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.navy.withOpacity(0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.account_balance_rounded,
+                size: 16,
+                color: Color(0xFF1A7A4A),
+              ),
+              SizedBox(width: 8),
+              Text(
+                'Commission & Points Ledger',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textPrimary,
+                  letterSpacing: -0.2,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _MetricBlock(
+                  label: 'Total Commission',
+                  value: '৳$totalCommission',
+                  color: const Color(0xFF1A7A4A),
+                  bg: const Color(0xFFE8F5EE),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _MetricBlock(
+                  label: 'Platform Net',
+                  value: '৳$platformNet',
+                  color: const Color(0xFF2980B9),
+                  bg: const Color(0xFFEAF4FC),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _MetricBlock(
+                  label: 'Points Issued',
+                  value: '$totalPointsIssued pts',
+                  color: AppColors.star,
+                  bg: AppColors.starBg,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _MetricBlock(
+                  label: 'Points Redeemed',
+                  value: '$totalPointsRedeemed pts',
+                  color: AppColors.urgent,
+                  bg: AppColors.urgentBg,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _MetricBlock(
+                  label: 'Outstanding',
+                  value: '$outstandingPoints pts',
+                  sub: 'Liability ৳$pointsLiability',
+                  color: AppColors.navy,
+                  bg: AppColors.navyLight,
+                ),
+              ),
+            ],
+          ),
+          if (commissionByMonth.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const Text(
+              'Commission Trend (Last 6 Months)',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: AppColors.textSecondary,
+                letterSpacing: 0.3,
+              ),
+            ),
+            const SizedBox(height: 10),
+            _CommissionTrend(byMonth: commissionByMonth),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricBlock extends StatelessWidget {
+  final String label;
+  final String value;
+  final String? sub;
+  final Color color;
+  final Color bg;
+  const _MetricBlock({
+    required this.label,
+    required this.value,
+    required this.color,
+    required this.bg,
+    this.sub,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: color,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w900,
+              color: color,
+              letterSpacing: -0.3,
+            ),
+          ),
+          if (sub != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                sub!,
+                style: TextStyle(
+                  fontSize: 9,
+                  color: color.withOpacity(0.7),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CommissionTrend extends StatelessWidget {
+  final Map<String, int> byMonth;
+  const _CommissionTrend({required this.byMonth});
+
+  @override
+  Widget build(BuildContext context) {
+    const monthNames = [
+      '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    final entries = byMonth.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final maxAmt =
+        entries.fold<int>(0, (m, e) => e.value > m ? e.value : m);
+
+    return Column(
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: entries.asMap().entries.map((e) {
+            final isLast = e.key == entries.length - 1;
+            final v = e.value.value;
+            final h = maxAmt == 0 ? 4.0 : (v / maxAmt * 60).clamp(4.0, 60.0);
+            return Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(right: isLast ? 0 : 4),
+                child: Column(
+                  children: [
+                    Text(
+                      v == 0
+                          ? '৳0'
+                          : v >= 1000
+                              ? '৳${(v / 1000).toStringAsFixed(1)}K'
+                              : '৳$v',
+                      style: const TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF1A7A4A),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    ClipRRect(
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(4),
+                      ),
+                      child: Container(
+                        height: h,
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.bottomCenter,
+                            end: Alignment.topCenter,
+                            colors: [
+                              Color(0xFF1A7A4A),
+                              Color(0x991A7A4A),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          children: entries.asMap().entries.map((e) {
+            final isLast = e.key == entries.length - 1;
+            final parts = e.value.key.split('-');
+            final month = int.tryParse(parts.length > 1 ? parts[1] : '') ?? 0;
+            final year = parts.isNotEmpty ? parts[0] : '';
+            final label = month >= 1 && month <= 12
+                ? '${monthNames[month]} ${year.length >= 2 ? year.substring(year.length - 2) : year}'
+                : e.value.key;
+            return Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(right: isLast ? 0 : 4),
+                child: Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
     );
   }
 }

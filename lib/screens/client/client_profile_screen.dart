@@ -1,7 +1,5 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:geocoding/geocoding.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/auth_service.dart';
 import '../../services/connectivity_service.dart';
@@ -9,6 +7,7 @@ import '../../services/database_service.dart';
 import '../../utils/app_colors.dart';
 import '../../utils/theme_notifier.dart';
 import '../../widgets/shared_widgets.dart';
+import '../shared/location_picker_screen.dart';
 import '../shared/user_type_screen.dart';
 import 'client_notifications_screen.dart';
 import 'saved_providers_screen.dart';
@@ -72,56 +71,29 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
     }
   }
 
-  Future<void> _detectAndFillLocation(TextEditingController ctrl,
-      void Function(void Function()) setSt) async {
+  Future<void> _pickLocationOnMap(
+    TextEditingController ctrl,
+    void Function(void Function()) setSt,
+  ) async {
+    final picked = await LocationPickerScreen.pick(context);
+    if (picked == null) return;
+    ctrl.text = picked.address;
     setSt(() {});
-    try {
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.deniedForever ||
-          permission == LocationPermission.denied) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location permission denied')),
-          );
-        }
-        return;
-      }
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
-      String address = '${pos.latitude.toStringAsFixed(4)}, '
-          '${pos.longitude.toStringAsFixed(4)}';
+    final userId = AuthService.getCurrentUserId();
+    if (userId != null) {
       try {
-        final placemarks =
-            await placemarkFromCoordinates(pos.latitude, pos.longitude);
-        if (placemarks.isNotEmpty) {
-          final p = placemarks.first;
-          final parts = [p.subLocality, p.locality, p.administrativeArea]
-              .where((s) => s != null && s!.isNotEmpty)
-              .map((s) => s!)
-              .toList();
-          if (parts.isNotEmpty) address = parts.join(', ');
-        }
-      } catch (_) {}
-      ctrl.text = address;
-      // Store lat/lng to Firestore
-      final userId = AuthService.getCurrentUserId();
-      if (userId != null) {
         await DatabaseService.updateUserLocation(
           userId: userId,
-          latitude: pos.latitude,
-          longitude: pos.longitude,
+          latitude: picked.latitude,
+          longitude: picked.longitude,
           isClient: true,
         );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not detect location: $e')),
-        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not save location: $e')),
+          );
+        }
       }
     }
   }
@@ -225,13 +197,13 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                     prefixIconConstraints: const BoxConstraints(),
                     suffixIcon: IconButton(
                       icon: const Icon(
-                        Icons.my_location_rounded,
+                        Icons.map_rounded,
                         size: 18,
                         color: AppColors.navy,
                       ),
-                      tooltip: 'Use current location',
+                      tooltip: 'Pick on map',
                       onPressed: () =>
-                          _detectAndFillLocation(locationCtrl, setSt),
+                          _pickLocationOnMap(locationCtrl, setSt),
                     ),
                     filled: true,
                     fillColor: AppColors.surfaceAlt,

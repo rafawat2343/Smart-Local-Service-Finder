@@ -6,6 +6,7 @@ import '../../services/database_service.dart';
 import '../../utils/app_colors.dart';
 import '../../widgets/shared_widgets.dart';
 import '../shared/chat_screen.dart';
+import 'provider_earnings_screen.dart';
 import 'provider_notifications_screen.dart';
 import 'provider_profile_screen.dart';
 
@@ -278,10 +279,17 @@ class _FeedHomeState extends State<_FeedHome> {
 
       // Load real stats
       final stats = await DatabaseService.getProviderStats(userId);
-      final totalEarnings = (stats['totalEarnings'] ?? 0).toDouble();
-      final earningsStr = totalEarnings >= 1000
-          ? '৳${(totalEarnings / 1000).toStringAsFixed(1)}k'
-          : '৳${totalEarnings.toInt()}';
+      // Surface NET earnings (after the 10% commission). Falls back to the
+      // legacy gross totalEarnings on docs that predate the ledger feature.
+      final lifetimeNet = (profile?['lifetimeEarningsTaka'] is num)
+          ? (profile!['lifetimeEarningsTaka'] as num).toInt()
+          : 0;
+      final fallbackGross = (stats['totalEarnings'] ?? 0).toDouble();
+      final earningsValue =
+          lifetimeNet > 0 ? lifetimeNet.toDouble() : fallbackGross;
+      final earningsStr = earningsValue >= 1000
+          ? '৳${(earningsValue / 1000).toStringAsFixed(1)}k'
+          : '৳${earningsValue.toInt()}';
 
       if (mounted) {
         setState(() {
@@ -577,7 +585,19 @@ class _FeedHomeState extends State<_FeedHome> {
                         color: Colors.black.withOpacity(0.1),
                         margin: const EdgeInsets.symmetric(horizontal: 16),
                       ),
-                      _KpiTile(label: 'Earnings', value: _earnings),
+                      _KpiTile(
+                        label: 'Net Earnings',
+                        value: _earnings,
+                        onTap: () async {
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const ProviderEarningsScreen(),
+                            ),
+                          );
+                          _loadData();
+                        },
+                      ),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -1070,34 +1090,106 @@ class _NotificationBell extends StatelessWidget {
   }
 }
 
+class _ProviderCommissionStrip extends StatelessWidget {
+  final Map<String, dynamic> booking;
+  const _ProviderCommissionStrip({required this.booking});
+
+  static int _toInt(dynamic v) {
+    if (v is num) return v.toInt();
+    if (v is String) {
+      return int.tryParse(v.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+    }
+    return 0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final agreed = _toInt(booking['agreedAmountTaka']);
+    final commission = _toInt(booking['commissionAmount']);
+    final net = _toInt(booking['providerNetTaka']) > 0
+        ? _toInt(booking['providerNetTaka'])
+        : (agreed - commission);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.successBg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.success.withOpacity(0.25)),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.account_balance_wallet_rounded,
+            size: 13,
+            color: AppColors.success,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'Agreed ৳$agreed   Commission −৳$commission   Net ৳$net',
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: AppColors.success,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _KpiTile extends StatelessWidget {
   final String label;
   final String value;
-  const _KpiTile({required this.label, required this.value});
+  final VoidCallback? onTap;
+  const _KpiTile({required this.label, required this.value, this.onTap});
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Text(
-        value,
-        style: const TextStyle(
-          color: Colors.black,
-          fontSize: 16,
-          fontWeight: FontWeight.w800,
-          letterSpacing: -0.3,
+  Widget build(BuildContext context) {
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(
+              value,
+              style: const TextStyle(
+                color: Colors.black,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.3,
+              ),
+            ),
+            if (onTap != null)
+              const Padding(
+                padding: EdgeInsets.only(left: 2),
+                child: Icon(
+                  Icons.chevron_right_rounded,
+                  size: 16,
+                  color: Colors.black54,
+                ),
+              ),
+          ],
         ),
-      ),
-      Text(
-        label,
-        style: TextStyle(
-          color: Colors.black.withOpacity(0.5),
-          fontSize: 10,
-          fontWeight: FontWeight.w500,
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.black.withOpacity(0.5),
+            fontSize: 10,
+            fontWeight: FontWeight.w500,
+          ),
         ),
-      ),
-    ],
-  );
+      ],
+    );
+    if (onTap == null) return content;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: content,
+    );
+  }
 }
 
 // ─── My Jobs ──────────────────────────────────────────────────────────────────
@@ -1361,6 +1453,10 @@ class _MyJobsScreenState extends State<_MyJobsScreen> {
                             ),
                         ],
                       ),
+                      if (b['commissionRecorded'] == true) ...[
+                        const SizedBox(height: 10),
+                        _ProviderCommissionStrip(booking: b),
+                      ],
                       const SizedBox(height: 10),
                       Row(
                         children: [
